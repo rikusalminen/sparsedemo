@@ -23,7 +23,7 @@ and NDK documentation.
 
 3. Build native code
 
-    $ ndk-build
+    $ ndk-build NDK_DEBUG=1
 
 4. Create apk package signed with debug key.
 
@@ -31,4 +31,4 @@ and NDK documentation.
 
 5. Install on device and test!
 
-    $ adb install bin/NdkSkeleton-debug.apk
+    $ adb install -r bin/NdkSkeleton-debug.apk
