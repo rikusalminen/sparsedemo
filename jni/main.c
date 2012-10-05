@@ -62,59 +62,59 @@ static void app_cmd_callback(struct android_app *android_app, int32_t cmd)
     switch(cmd)
     {
         case APP_CMD_INIT_WINDOW:
-            //LOGI("APP_CMD_INIT_WINDOW");
+            LOGI("APP_CMD_INIT_WINDOW");
             gles_init(android_app);
             gles_paint();
             break;
         case APP_CMD_TERM_WINDOW:
-            //LOGI("APP_CMD_TERM_WINDOW");
+            LOGI("APP_CMD_TERM_WINDOW");
             gles_quit();
             break;
         case APP_CMD_WINDOW_REDRAW_NEEDED:
-            //LOGI("APP_CMD_WINDOW_REDRAW_NEEDED");
+            LOGI("APP_CMD_WINDOW_REDRAW_NEEDED");
             gles_paint();
             break;
 
         case APP_CMD_INPUT_CHANGED:
-            //LOGI("APP_CMD_INPUT_CHANGED");
+            LOGI("APP_CMD_INPUT_CHANGED");
             break;
         case APP_CMD_WINDOW_RESIZED:
-            //LOGI("APP_CMD_WINDOW_RESIZED");
+            LOGI("APP_CMD_WINDOW_RESIZED");
             break;
         case APP_CMD_CONTENT_RECT_CHANGED:
-            //LOGI("APP_CMD_CONTENT_RECT_CHANGED");
+            LOGI("APP_CMD_CONTENT_RECT_CHANGED");
             break;
         case APP_CMD_GAINED_FOCUS:
-            //LOGI("APP_CMD_GAINED_FOCUS");
+            LOGI("APP_CMD_GAINED_FOCUS");
             break;
         case APP_CMD_LOST_FOCUS:
-            //LOGI("APP_CMD_LOST_FOCUS");
+            LOGI("APP_CMD_LOST_FOCUS");
             break;
         case APP_CMD_CONFIG_CHANGED:
-            //LOGI("APP_CMD_CONFIG_CHANGED");
+            LOGI("APP_CMD_CONFIG_CHANGED");
             break;
         case APP_CMD_LOW_MEMORY:
-            //LOGI("APP_CMD_LOW_MEMORY");
+            LOGI("APP_CMD_LOW_MEMORY");
             break;
         case APP_CMD_START:
-            //LOGI("APP_CMD_START");
+            LOGI("APP_CMD_START");
             break;
         case APP_CMD_RESUME:
-            //LOGI("APP_CMD_RESUME");
+            LOGI("APP_CMD_RESUME");
             break;
         case APP_CMD_SAVE_STATE:
-            //LOGI("APP_CMD_SAVE_STATE");
+            LOGI("APP_CMD_SAVE_STATE");
             android_app->savedState = NULL;
             android_app->savedStateSize = 0;
             break;
         case APP_CMD_PAUSE:
-            //LOGI("APP_CMD_PAUSE");
+            LOGI("APP_CMD_PAUSE");
             break;
         case APP_CMD_STOP:
-            //LOGI("APP_CMD_STOP");
+            LOGI("APP_CMD_STOP");
             break;
         case APP_CMD_DESTROY:
-            //LOGI("APP_CMD_DESTROY");
+            LOGI("APP_CMD_DESTROY");
             break;
         default:
             break;
@@ -149,11 +149,12 @@ void android_main(struct android_app *android_app)
     android_app->onAppCmd = app_cmd_callback;
     android_app->onInputEvent = input_event_callback;
 
-    int events;
-    struct android_poll_source *source;
     while(!android_app->destroyRequested)
     {
-        while(ALooper_pollAll(-1, NULL, &events, (void**)&source) >= 0)
+        int events;
+        struct android_poll_source *source;
+        while(!android_app->destroyRequested &&
+            ALooper_pollAll(-1, NULL, &events, (void**)&source) >= 0)
         {
             if(source)
                 source->process(android_app, source);
