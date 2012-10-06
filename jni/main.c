@@ -21,14 +21,23 @@ static void gles_init(struct android_app *android_app)
     eglInitialize(display, 0, 0);
 
     const int config_attribs[] = {
+        EGL_RED_SIZE, 0,
+        EGL_GREEN_SIZE, 0,
+        EGL_BLUE_SIZE, 0,
+        EGL_ALPHA_SIZE, 0,
+        EGL_DEPTH_SIZE, 0,
+        EGL_STENCIL_SIZE, 0,
+        EGL_SAMPLES, 0,
+        EGL_SAMPLE_BUFFERS, 0,
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_NONE
     };
 
     LOGI("EGL_VENDOR: %s", eglQueryString(display, EGL_VENDOR));
     LOGI("EGL_VERSION: %s", eglQueryString(display, EGL_VERSION));
-    LOGI("EGL_EXTENSIONS: %s", eglQueryString(display, EGL_EXTENSIONS));
     LOGI("EGL_CLIENT_APIS: %s", eglQueryString(display, EGL_CLIENT_APIS));
+    LOGI("EGL_EXTENSIONS: %s", eglQueryString(display, EGL_EXTENSIONS));
 
     EGLConfig config;
     int num_configs;
@@ -41,10 +50,11 @@ static void gles_init(struct android_app *android_app)
     surface = eglCreateWindowSurface(display, config, android_app->window, NULL);
 
     const int context_attribs[] = {
-        //EGL_CONTEXT_CLIENT_VERSION, 2,
-        GL_NONE
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
     };
-    context = eglCreateContext(display, config, NULL, context_attribs);
+    eglBindAPI(EGL_OPENGL_ES_API);
+    context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
 
     eglMakeCurrent(display, surface, surface, context);
 
