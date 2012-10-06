@@ -19,7 +19,7 @@ and NDK documentation.
 
 2. After touching AndroidManifest.xml, update the project
 
-    $ android update project --path . --target android-16 --subprojects
+    $ android update project --name NdkSkeleton --path . --target android-16 --subprojects
 
 3. Build native code
 

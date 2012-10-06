@@ -20,23 +20,39 @@ static void gles_init(struct android_app *android_app)
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(display, 0, 0);
 
-    const int attribs[] = {
+    const int config_attribs[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_NONE
     };
 
+    LOGI("EGL_VENDOR: %s", eglQueryString(display, EGL_VENDOR));
+    LOGI("EGL_VERSION: %s", eglQueryString(display, EGL_VERSION));
+    LOGI("EGL_EXTENSIONS: %s", eglQueryString(display, EGL_EXTENSIONS));
+    LOGI("EGL_CLIENT_APIS: %s", eglQueryString(display, EGL_CLIENT_APIS));
+
     EGLConfig config;
     int num_configs;
-    eglChooseConfig(display, attribs, &config, 1, &num_configs);
+    eglChooseConfig(display, config_attribs, &config, 1, &num_configs);
 
     int format;
     eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
     ANativeWindow_setBuffersGeometry(android_app->window, 0, 0, format);
 
     surface = eglCreateWindowSurface(display, config, android_app->window, NULL);
-    context = eglCreateContext(display, config, NULL, NULL);
+
+    const int context_attribs[] = {
+        //EGL_CONTEXT_CLIENT_VERSION, 2,
+        GL_NONE
+    };
+    context = eglCreateContext(display, config, NULL, context_attribs);
 
     eglMakeCurrent(display, surface, surface, context);
+
+    LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
+    LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
+    LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
+    LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
+
 }
 
 static void gles_quit()
