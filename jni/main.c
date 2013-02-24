@@ -3,9 +3,8 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
-
 #include <android/input.h>
-#include <android_native_app_glue.h>
+#include <android/native_activity.h>
 
 #include <android/log.h>
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, __FILE__, __VA_ARGS__))
@@ -15,7 +14,7 @@ static EGLDisplay display;
 static EGLSurface surface;
 static EGLContext context;
 
-static void gles_init(struct android_app *android_app)
+static void gles_init(ANativeWindow *native_window)
 {
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(display, 0, 0);
@@ -45,9 +44,9 @@ static void gles_init(struct android_app *android_app)
 
     int format;
     eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
-    ANativeWindow_setBuffersGeometry(android_app->window, 0, 0, format);
+    ANativeWindow_setBuffersGeometry(native_window, 0, 0, format);
 
-    surface = eglCreateWindowSurface(display, config, android_app->window, NULL);
+    surface = eglCreateWindowSurface(display, config, native_window, NULL);
 
     const int context_attribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 2,
@@ -81,109 +80,180 @@ static void gles_paint()
     eglSwapBuffers(display, surface);
 }
 
-static void app_cmd_callback(struct android_app *android_app, int32_t cmd)
+static void onStart(ANativeActivity* activity)
 {
-    (void)android_app;
-
-    switch(cmd)
-    {
-        case APP_CMD_INIT_WINDOW:
-            LOGI("APP_CMD_INIT_WINDOW");
-            gles_init(android_app);
-            gles_paint();
-            break;
-        case APP_CMD_TERM_WINDOW:
-            LOGI("APP_CMD_TERM_WINDOW");
-            gles_quit();
-            break;
-        case APP_CMD_WINDOW_REDRAW_NEEDED:
-            LOGI("APP_CMD_WINDOW_REDRAW_NEEDED");
-            gles_paint();
-            break;
-
-        case APP_CMD_INPUT_CHANGED:
-            LOGI("APP_CMD_INPUT_CHANGED");
-            break;
-        case APP_CMD_WINDOW_RESIZED:
-            LOGI("APP_CMD_WINDOW_RESIZED");
-            break;
-        case APP_CMD_CONTENT_RECT_CHANGED:
-            LOGI("APP_CMD_CONTENT_RECT_CHANGED");
-            break;
-        case APP_CMD_GAINED_FOCUS:
-            LOGI("APP_CMD_GAINED_FOCUS");
-            break;
-        case APP_CMD_LOST_FOCUS:
-            LOGI("APP_CMD_LOST_FOCUS");
-            break;
-        case APP_CMD_CONFIG_CHANGED:
-            LOGI("APP_CMD_CONFIG_CHANGED");
-            break;
-        case APP_CMD_LOW_MEMORY:
-            LOGI("APP_CMD_LOW_MEMORY");
-            break;
-        case APP_CMD_START:
-            LOGI("APP_CMD_START");
-            break;
-        case APP_CMD_RESUME:
-            LOGI("APP_CMD_RESUME");
-            break;
-        case APP_CMD_SAVE_STATE:
-            LOGI("APP_CMD_SAVE_STATE");
-            android_app->savedState = NULL;
-            android_app->savedStateSize = 0;
-            break;
-        case APP_CMD_PAUSE:
-            LOGI("APP_CMD_PAUSE");
-            break;
-        case APP_CMD_STOP:
-            LOGI("APP_CMD_STOP");
-            break;
-        case APP_CMD_DESTROY:
-            LOGI("APP_CMD_DESTROY");
-            break;
-        default:
-            break;
-    }
+    (void)activity;
+    LOGI("ANativeActivity onStart");
 }
 
-static int32_t input_event_callback(struct android_app* android_app, AInputEvent* event)
+static void onResume(ANativeActivity* activity)
 {
-    (void)android_app;
-    (void)event;
+    (void)activity;
+    LOGI("ANativeActivity onResume");
+}
 
-    switch(AInputEvent_getType(event))
-    {
-        case AINPUT_EVENT_TYPE_KEY:
-        case AINPUT_EVENT_TYPE_MOTION:
-            //return 1;
-        default:
-            break;
-    }
+static void* onSaveInstanceState(ANativeActivity* activity, size_t* outSize)
+{
+    (void)activity;
+    LOGI("ANativeActivity onSaveInstanceState");
 
+    *outSize = 0;
     return 0;
 }
 
-void android_main(struct android_app *android_app)
+static void onPause(ANativeActivity* activity)
 {
-    (void)android_app;
+    (void)activity;
+    LOGI("ANativeActivity onPause");
+}
 
-    // Make sure glue isn't stripped.
-    app_dummy();
+static void onStop(ANativeActivity* activity)
+{
+    (void)activity;
+    LOGI("ANativeActivity onStop");
+}
 
-    android_app->userData = NULL;
-    android_app->onAppCmd = app_cmd_callback;
-    android_app->onInputEvent = input_event_callback;
+static void onDestroy(ANativeActivity* activity)
+{
+    (void)activity;
+    LOGI("ANativeActivity onDestroy");
+}
 
-    while(!android_app->destroyRequested)
+static void onWindowFocusChanged(ANativeActivity* activity, int hasFocus)
+{
+    (void)activity;
+    (void)hasFocus;
+    LOGI("ANativeActivity onWindowFocusChanged");
+}
+
+static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* window)
+{
+    (void)activity;
+    (void)window;
+    LOGI("ANativeActivity onNativeWindowCreated");
+
+    gles_init(window);
+    //gles_paint();
+}
+
+static void onNativeWindowResized(ANativeActivity* activity, ANativeWindow* window)
+{
+    (void)activity;
+    (void)window;
+    LOGI("ANativeActivity onNativeWindowResized");
+}
+
+static void onNativeWindowRedrawNeeded(ANativeActivity* activity, ANativeWindow* window)
+{
+    (void)activity;
+    (void)window;
+    LOGI("ANativeActivity onNativeWindowRedrawNeeded");
+
+    gles_paint();
+}
+
+static void onNativeWindowDestroyed(ANativeActivity* activity, ANativeWindow* window)
+{
+    (void)activity;
+    (void)window;
+    LOGI("ANativeActivity onNativeWindowDestroyed");
+
+    gles_quit();
+}
+
+static int input_callback(int fd, int events, void* data)
+{
+    (void)fd;
+    (void)events;
+    AInputQueue* queue = (AInputQueue*)data;
+
+    int32_t has_events = AInputQueue_hasEvents(queue);
+    if(has_events < 0)
+        LOGW("**** AInputQueue_hasEvents FAILED");
+
+    if(has_events > 0)
     {
-        int events;
-        struct android_poll_source *source;
-        while(!android_app->destroyRequested &&
-            ALooper_pollAll(-1, NULL, &events, (void**)&source) >= 0)
+        AInputEvent* event;
+        if(AInputQueue_getEvent(queue, &event) < 0)
+            LOGW("**** AInputQueue_getEvent FAILED");
+        else
         {
-            if(source)
-                source->process(android_app, source);
+            LOGI("**** INPUT EVENT type: %d\n", AInputEvent_getType(event));
+            if(AInputQueue_preDispatchEvent(queue, event) == 0)
+            {
+                LOGI("**** INPUT EVENT handle\n");
+                int handled = 0;
+                AInputQueue_finishEvent(queue, event, handled);
+            }
         }
     }
+
+    return 1;
+}
+
+static void onInputQueueCreated(ANativeActivity* activity, AInputQueue* queue)
+{
+    (void)activity;
+    LOGI("ANativeActivity onInputQueueCreated");
+
+    ALooper* looper = ALooper_forThread();
+    int ident = ALOOPER_POLL_CALLBACK;
+    int (*callback)(int fd, int events, void* data) = input_callback;
+    void *data = (void*)queue;
+    AInputQueue_attachLooper(queue, looper, ident, callback, data);
+}
+
+static void onInputQueueDestroyed(ANativeActivity* activity, AInputQueue* queue)
+{
+    (void)activity;
+    LOGI("ANativeActivity onInputQueueDestroyed");
+
+    AInputQueue_detachLooper(queue);
+}
+
+static void onContentRectChanged(ANativeActivity* activity, const ARect* rect)
+{
+    (void)activity;
+    (void)rect;
+    LOGI("ANativeActivity onContentRectChanged");
+}
+
+static void onConfigurationChanged(ANativeActivity* activity)
+{
+    (void)activity;
+    LOGI("ANativeActivity onConfigurationChanged");
+}
+
+static void onLowMemory(ANativeActivity* activity)
+{
+    (void)activity;
+    LOGI("ANativeActivity onLowMemory");
+}
+
+void ANativeActivity_onCreate(
+    ANativeActivity* activity,
+    void* saved_state,
+    size_t saved_state_size)
+{
+    (void)saved_state;
+    (void)saved_state_size;
+
+    activity->callbacks->onStart = onStart;
+    activity->callbacks->onResume = onResume;
+    activity->callbacks->onSaveInstanceState = onSaveInstanceState;
+    activity->callbacks->onPause = onPause;
+    activity->callbacks->onStop = onStop;
+    activity->callbacks->onDestroy = onDestroy;
+    activity->callbacks->onWindowFocusChanged = onWindowFocusChanged;
+    activity->callbacks->onNativeWindowCreated = onNativeWindowCreated;
+    activity->callbacks->onNativeWindowResized = onNativeWindowResized;
+    activity->callbacks->onNativeWindowRedrawNeeded = onNativeWindowRedrawNeeded;
+    activity->callbacks->onNativeWindowDestroyed = onNativeWindowDestroyed;
+    activity->callbacks->onInputQueueCreated = onInputQueueCreated;
+    activity->callbacks->onInputQueueDestroyed = onInputQueueDestroyed;
+    activity->callbacks->onContentRectChanged = onContentRectChanged;
+    activity->callbacks->onConfigurationChanged = onConfigurationChanged;
+    activity->callbacks->onLowMemory = onLowMemory;
+
+    activity->instance = (void*)0xdeadbeef;
 }

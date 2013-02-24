@@ -6,8 +6,7 @@ LOCAL_MODULE := ndk-skeleton
 LOCAL_CFLAGS=-std=gnu99 -W -Wall -Wextra -Werror
 LOCAL_CFLAGS+=-g
 LOCAL_SRC_FILES=main.c
-LOCAL_LDLIBS=-landroid -lEGL -lGLESv2
-LOCAL_STATIC_LIBRARIES := android_native_app_glue
+LOCAL_LDLIBS=-landroid -llog -lEGL -lGLESv2
 
 include $(BUILD_SHARED_LIBRARY)
 
