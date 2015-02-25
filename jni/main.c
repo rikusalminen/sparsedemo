@@ -1,7 +1,8 @@
 #include <stdbool.h>
 
 #include <EGL/egl.h>
-#include <GLES2/gl2.h>
+#include <EGL/eglext.h>
+#include <GLXW/glxw.h>
 
 #include <android/input.h>
 #include <android/sensor.h>
@@ -32,7 +33,7 @@ static void egl_init()
         EGL_SAMPLES, 0,
         EGL_SAMPLE_BUFFERS, 0,
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
         EGL_NONE
     };
 
@@ -47,12 +48,14 @@ static void egl_init()
     eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
 
     const int context_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
+        EGL_CONTEXT_MINOR_VERSION_KHR, 5,
         EGL_NONE
     };
-    eglBindAPI(EGL_OPENGL_ES_API);
+    eglBindAPI(EGL_OPENGL_API);
     context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
 
+    glxwInit();
 }
 
 static void egl_quit()
@@ -75,15 +78,23 @@ static void gles_quit()
 
 static void gles_paint()
 {
+    static int once = 0;
+
     eglMakeCurrent(display, surface, surface, context);
+    eglSwapInterval(display, 1);
 
-    //LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
-    //LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
-    //LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
-    //LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
+    if(!once++) {
+        LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
+        LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
+        LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
+        LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
+    }
 
-    glClearColor(0.2, 0.4, 0.7, 1.0);
-    glClear(GL_COLOR_BUFFER_BIT);
+    //glClearColor(0.2, 0.4, 0.7, 1.0);
+    //glClear(GL_COLOR_BUFFER_BIT);
+
+    float clear_color[] = { 0.2, 0.4, 0.7, 1.0 };
+    glClearBufferfv(GL_COLOR, 0, clear_color);
 
     eglSwapBuffers(display, surface);
 
