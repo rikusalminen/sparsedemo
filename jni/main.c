@@ -4,6 +4,9 @@
 #include <EGL/eglext.h>
 #include <GLXW/glxw.h>
 
+#include <time.h>
+#include <pthread.h>
+
 #include <android/input.h>
 #include <android/sensor.h>
 #include <android/native_activity.h>
@@ -13,10 +16,129 @@
 #define LOGW(...) ((void)__android_log_print(ANDROID_LOG_WARN, __FILE__, __VA_ARGS__))
 
 static EGLDisplay display = 0;
-static EGLSurface surface = 0;
-static EGLContext context = 0;
 static EGLConfig config = 0;
-static int format = 0;
+static int native_format = 0;
+
+static struct painter {
+    ANativeActivity *native_activity;
+    ANativeWindow *native_window;
+    EGLSurface surface;
+    EGLContext context;
+
+    pthread_mutex_t lock;
+    pthread_cond_t state_changed;
+
+    pthread_t painter_thread;
+
+    int stopped, dirty, painting;
+} painter_;
+
+static int gfx_init() {
+    LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
+    LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
+    LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
+    LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
+
+    return 0;
+}
+
+static int gfx_paint() {
+    float clear_color[] = { 0.2, 0.4, 0.7, 1.0 };
+    glClearBufferfv(GL_COLOR, 0, clear_color);
+
+    return 0;
+}
+
+static int gfx_quit() {
+
+    return 0;
+}
+
+static void *painter_main(void *ptr) {
+    struct painter *painter = (struct painter*)ptr;
+
+    eglMakeCurrent(display, painter->surface, painter->surface, painter->context);
+    eglSwapInterval(display, 1);
+
+    int error = 0;
+    if(gfx_init() != 0)
+        error = -1;
+
+    while(error == 0) {
+        // lock the mutex and check if repaint is needed
+        int stopped = 0;
+        pthread_mutex_lock(&painter->lock);
+
+        while(!painter->stopped && !painter->painting && !painter->dirty)
+            pthread_cond_wait(&painter->state_changed, &painter->lock); // XXX: timeout
+
+        stopped = painter->stopped;
+        painter->dirty = 0;
+
+        pthread_mutex_unlock(&painter->lock);
+
+        // exit loop if stopped
+        if(stopped)
+            break;
+
+        // paint the screen
+        if(gfx_paint() != 0)
+            error = -1;
+        else
+            eglSwapBuffers(display, painter->surface);
+
+        // XXX: kill me
+        struct timespec delay = { 1, 0 };
+        nanosleep(&delay, NULL); // XXX: vsync & frame limiter
+    }
+
+    if(gfx_quit() != 0)
+        error = -1;
+
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
+    if(error != 0)
+        ANativeActivity_finish(painter->native_activity); // XXX: clean up?
+
+    return error == 0 ? ptr : NULL;
+}
+
+static void painter_start(struct painter *painter) {
+    pthread_mutex_init(&painter->lock, NULL);
+
+    pthread_condattr_t condattr;
+    pthread_condattr_init(&condattr);
+    // clockid_t clock_id = CLOCK_MONOTONIC;
+    //pthread_condattr_setclock(&condattr, clock_id);
+    pthread_cond_init(&painter->state_changed, &condattr);
+    pthread_condattr_destroy(&condattr);
+
+    pthread_create(&painter->painter_thread, NULL, painter_main, painter);
+}
+
+static void painter_dirty(struct painter *painter) {
+    pthread_mutex_lock(&painter->lock);
+    painter->dirty = 1;
+    pthread_cond_signal(&painter->state_changed);
+    pthread_mutex_unlock(&painter->lock);
+}
+
+static int painter_stop(struct painter *painter) {
+    pthread_mutex_lock(&painter->lock);
+    painter->stopped = 1;
+    pthread_cond_broadcast(&painter->state_changed);
+    pthread_mutex_unlock(&painter->lock);
+
+    void *ret;
+    pthread_join(painter->painter_thread, &ret);
+
+    pthread_mutex_destroy(&painter->lock);
+    pthread_cond_destroy(&painter->state_changed);
+
+    memset(painter, 0, sizeof(*painter));
+
+    return ret == (void*)painter ? 0 : -1;
+}
 
 static void egl_init()
 {
@@ -44,61 +166,14 @@ static void egl_init()
 
     int num_configs;
     eglChooseConfig(display, config_attribs, &config, 1, &num_configs);
-
-    eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
-
-    const int context_attribs[] = {
-        EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
-        EGL_CONTEXT_MINOR_VERSION_KHR, 5,
-        EGL_NONE
-    };
-    eglBindAPI(EGL_OPENGL_API);
-    context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
+    eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &native_format);
 
     glxwInit();
 }
 
 static void egl_quit()
 {
-    eglDestroyContext(display, context);
     eglTerminate(display);
-}
-
-static void gles_init(ANativeWindow *native_window)
-{
-    ANativeWindow_setBuffersGeometry(native_window, 0, 0, format);
-
-    surface = eglCreateWindowSurface(display, config, native_window, NULL);
-}
-
-static void gles_quit()
-{
-    eglDestroySurface(display, surface);
-}
-
-static void gles_paint()
-{
-    static int once = 0;
-
-    eglMakeCurrent(display, surface, surface, context);
-    eglSwapInterval(display, 1);
-
-    if(!once++) {
-        LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
-        LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
-        LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
-        LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
-    }
-
-    //glClearColor(0.2, 0.4, 0.7, 1.0);
-    //glClear(GL_COLOR_BUFFER_BIT);
-
-    float clear_color[] = { 0.2, 0.4, 0.7, 1.0 };
-    glClearBufferfv(GL_COLOR, 0, clear_color);
-
-    eglSwapBuffers(display, surface);
-
-    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 }
 
 static void handle_event_key(AInputEvent *event)
@@ -261,47 +336,56 @@ static void onWindowFocusChanged(ANativeActivity* activity, int hasFocus)
 
 }
 
-static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* window)
+static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* native_window)
 {
-    (void)activity;
-    (void)window;
     LOGI("ANativeActivity onNativeWindowCreated");
-
-    gles_init(window);
-    //gles_paint();
 
     //ANativeWindow_acquire(window);
     //ANativeWindow_release(window);
+   //
+    ANativeWindow_setBuffersGeometry(native_window, 0, 0, native_format);
 
-    LOGI("**** NATIVE WINDOW: %p\n", window);
+    EGLSurface surface = eglCreateWindowSurface(display, config, native_window, NULL);
+
+    const int context_attribs[] = {
+        EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
+        EGL_CONTEXT_MINOR_VERSION_KHR, 5,
+        EGL_NONE
+    };
+    eglBindAPI(EGL_OPENGL_API);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
+
+    struct painter *painter = (struct painter*)activity->instance;
+    painter->native_window = native_window;
+    painter->context = context;
+    painter->surface = surface;
+    painter_start(painter);
 
 }
 
-static void onNativeWindowResized(ANativeActivity* activity, ANativeWindow* window)
+static void onNativeWindowResized(ANativeActivity* activity, ANativeWindow* native_window)
 {
     (void)activity;
-    (void)window;
-    LOGI("ANativeActivity onNativeWindowResized");
+    LOGI("ANativeActivity onNativeWindowResized: %p", native_window);
 }
 
-static void onNativeWindowRedrawNeeded(ANativeActivity* activity, ANativeWindow* window)
+static void onNativeWindowRedrawNeeded(ANativeActivity* activity, ANativeWindow* native_window)
 {
-    (void)activity;
-    (void)window;
-    LOGI("ANativeActivity onNativeWindowRedrawNeeded");
+    LOGI("ANativeActivity onNativeWindowRedrawNeeded: %p", native_window);
 
-    gles_paint();
+    struct painter *painter = (struct painter*)activity->instance;
+    painter_dirty(painter);
 }
 
-static void onNativeWindowDestroyed(ANativeActivity* activity, ANativeWindow* window)
+static void onNativeWindowDestroyed(ANativeActivity* activity, ANativeWindow* native_window)
 {
-    (void)activity;
-    (void)window;
-    LOGI("ANativeActivity onNativeWindowDestroyed");
+    LOGI("ANativeActivity onNativeWindowDestroyed: %p", native_window);
 
-    LOGI("**** NATIVE WINDOW: %p\n", window);
+    struct painter *painter = (struct painter*)activity->instance;
+    painter_stop(painter);
 
-    gles_quit();
+    eglDestroySurface(display, painter->surface);
+    eglDestroyContext(display, painter->context);
 }
 
 static void onInputQueueCreated(ANativeActivity* activity, AInputQueue* queue)
@@ -368,7 +452,10 @@ void ANativeActivity_onCreate(
     activity->callbacks->onConfigurationChanged = onConfigurationChanged;
     activity->callbacks->onLowMemory = onLowMemory;
 
-    activity->instance = (void*)0xdeadbeef;
+
+    memset(&painter_, 0, sizeof(painter_));
+    painter_.native_activity = activity;
+    activity->instance = &painter_;
 
     egl_init();
 }
