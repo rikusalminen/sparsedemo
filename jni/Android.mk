@@ -9,6 +9,7 @@ LOCAL_CFLAGS+=-g
 LOCAL_SRC_FILES=\
 	main.c \
 	gfx.c \
+	gldebug.c \
 	glxw.c
 LOCAL_LDLIBS=-landroid -llog -lEGL -lGLESv2
 

@@ -335,6 +335,7 @@ static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* nati
     const int context_attribs[] = {
         EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
         EGL_CONTEXT_MINOR_VERSION_KHR, 5,
+        EGL_CONTEXT_FLAGS_KHR, EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR,
         EGL_NONE
     };
     eglBindAPI(EGL_OPENGL_API);
