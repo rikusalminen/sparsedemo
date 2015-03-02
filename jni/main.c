@@ -19,6 +19,12 @@ static EGLDisplay display = 0;
 static EGLConfig config = 0;
 static int native_format = 0;
 
+struct gfx;
+extern struct gfx gfx_;
+int gfx_init(struct gfx *gfx);
+int gfx_paint(struct gfx *gfx);
+int gfx_quit(struct gfx *gfx);
+
 static struct painter {
     ANativeActivity *native_activity;
     ANativeWindow *native_window;
@@ -33,27 +39,6 @@ static struct painter {
     int stopped, dirty, painting;
 } painter_;
 
-static int gfx_init() {
-    LOGI("GL_VERSION: %s", glGetString(GL_VERSION));
-    LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
-    LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
-    LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
-
-    return 0;
-}
-
-static int gfx_paint() {
-    float clear_color[] = { 0.2, 0.4, 0.7, 1.0 };
-    glClearBufferfv(GL_COLOR, 0, clear_color);
-
-    return 0;
-}
-
-static int gfx_quit() {
-
-    return 0;
-}
-
 static void *painter_main(void *ptr) {
     struct painter *painter = (struct painter*)ptr;
 
@@ -61,7 +46,7 @@ static void *painter_main(void *ptr) {
     eglSwapInterval(display, 1);
 
     int error = 0;
-    if(gfx_init() != 0)
+    if(gfx_init(&gfx_) != 0)
         error = -1;
 
     while(error == 0) {
@@ -82,7 +67,7 @@ static void *painter_main(void *ptr) {
             break;
 
         // paint the screen
-        if(gfx_paint() != 0)
+        if(gfx_paint(&gfx_) != 0)
             error = -1;
         else
             eglSwapBuffers(display, painter->surface);
@@ -92,7 +77,7 @@ static void *painter_main(void *ptr) {
         nanosleep(&delay, NULL); // XXX: vsync & frame limiter
     }
 
-    if(gfx_quit() != 0)
+    if(gfx_quit(&gfx_) != 0)
         error = -1;
 
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
