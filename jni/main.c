@@ -15,6 +15,8 @@
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, __FILE__, __VA_ARGS__))
 #define LOGW(...) ((void)__android_log_print(ANDROID_LOG_WARN, __FILE__, __VA_ARGS__))
 
+static const clockid_t clock_id = CLOCK_MONOTONIC;
+
 static EGLDisplay display = 0;
 static EGLConfig config = 0;
 static int native_format = 0;
@@ -22,7 +24,7 @@ static int native_format = 0;
 struct gfx;
 extern struct gfx gfx_;
 int gfx_init(struct gfx *gfx);
-int gfx_paint(struct gfx *gfx);
+int gfx_paint(struct gfx *gfx, uint64_t frame_number);
 int gfx_quit(struct gfx *gfx);
 
 static struct painter {
@@ -49,32 +51,77 @@ static void *painter_main(void *ptr) {
     if(gfx_init(&gfx_) != 0)
         error = -1;
 
+    uint64_t frame_number = 0;
+    uint64_t nanoseconds = 1000000000;
+    uint64_t min_interval = 1 * nanoseconds / 150;
+    uint64_t last_frame_time = 0;
+
+    uint64_t last_fps_report_time = 0;
+    uint64_t last_fps_frame = 0;
     while(error == 0) {
         // lock the mutex and check if repaint is needed
         int stopped = 0;
         pthread_mutex_lock(&painter->lock);
 
-        while(!painter->stopped && !painter->painting && !painter->dirty)
-            pthread_cond_wait(&painter->state_changed, &painter->lock); // XXX: timeout
+        int waiting = 1;
+        while(waiting) {
+            if(painter->stopped || painter->dirty) {
+                waiting = 0;
+            } else if(painter->painting && last_frame_time != 0) {
+                uint64_t next_frame = last_frame_time + min_interval;
+                struct timespec timeout = {
+                    next_frame / nanoseconds, // seconds
+                    next_frame % nanoseconds  // nanoseconds
+                };
+
+                int err = pthread_cond_timedwait(
+                    &painter->state_changed, &painter->lock,
+                    &timeout);
+
+                if(err == ETIMEDOUT)
+                    waiting = 0;
+                else if(err != 0)
+                    error = -1;
+            } else if(!painter->painting) {
+                pthread_cond_wait(&painter->state_changed, &painter->lock);
+            }
+        }
 
         stopped = painter->stopped;
         painter->dirty = 0;
 
         pthread_mutex_unlock(&painter->lock);
 
-        // exit loop if stopped
-        if(stopped)
+        // exit loop if stopped or error has occured
+        if(stopped || error != 0)
             break;
 
+        // frame timer clock
+        struct timespec frametime;
+        clock_gettime(clock_id, &frametime);
+        last_frame_time = (uint64_t)frametime.tv_sec * nanoseconds +
+            (uint64_t)frametime.tv_nsec;
+
         // paint the screen
-        if(gfx_paint(&gfx_) != 0)
+        if(gfx_paint(&gfx_, frame_number) != 0)
             error = -1;
         else
             eglSwapBuffers(display, painter->surface);
 
-        // XXX: kill me
-        struct timespec delay = { 1, 0 };
-        nanosleep(&delay, NULL); // XXX: vsync & frame limiter
+        // increase frame number
+        frame_number += 1;
+
+        // Report FPS once every 5 seconds
+        if(last_fps_report_time + nanoseconds * 5 < last_frame_time) {
+            uint64_t frames = frame_number - last_fps_frame;
+            uint64_t nanos = last_frame_time - last_fps_report_time;
+            uint64_t fps = nanoseconds * frames / nanos;
+
+            last_fps_report_time = last_frame_time;
+            last_fps_frame = frame_number;
+
+            LOGI("**** PAINTER FPS: %d\n", (int)fps);
+        }
     }
 
     if(gfx_quit(&gfx_) != 0)
@@ -93,8 +140,8 @@ static void painter_start(struct painter *painter) {
 
     pthread_condattr_t condattr;
     pthread_condattr_init(&condattr);
-    // clockid_t clock_id = CLOCK_MONOTONIC;
-    //pthread_condattr_setclock(&condattr, clock_id);
+    pthread_condattr_setclock(&condattr, clock_id);
+
     pthread_cond_init(&painter->state_changed, &condattr);
     pthread_condattr_destroy(&condattr);
 
@@ -105,6 +152,16 @@ static void painter_dirty(struct painter *painter) {
     pthread_mutex_lock(&painter->lock);
     painter->dirty = 1;
     pthread_cond_signal(&painter->state_changed);
+    pthread_mutex_unlock(&painter->lock);
+}
+
+static void painter_paint(struct painter *painter, int painting) {
+    pthread_mutex_lock(&painter->lock);
+    painter->painting = painting;
+
+    if(painting)
+        pthread_cond_signal(&painter->state_changed);
+
     pthread_mutex_unlock(&painter->lock);
 }
 
@@ -172,6 +229,8 @@ static void handle_event_key(AInputEvent *event)
         AKeyEvent_getRepeatCount(event),
         AKeyEvent_getDownTime(event),
         AKeyEvent_getEventTime(event));
+
+    painter_paint(&painter_, 1);
 }
 
 static void handle_event_motion(AInputEvent *event)
@@ -192,6 +251,8 @@ static void handle_event_motion(AInputEvent *event)
             AMotionEvent_getY(event, pointer_index),
             AMotionEvent_getPressure(event, pointer_index));
     }
+
+    painter_paint(&painter_, 0);
 }
 
 static void handle_event(AInputEvent *event)
@@ -438,6 +499,8 @@ void ANativeActivity_onCreate(
     activity->callbacks->onConfigurationChanged = onConfigurationChanged;
     activity->callbacks->onLowMemory = onLowMemory;
 
+    LOGI("*** internal data path: %s\n", activity->internalDataPath);
+    LOGI("*** external data path: %s\n", activity->externalDataPath);
 
     memset(&painter_, 0, sizeof(painter_));
     painter_.native_activity = activity;

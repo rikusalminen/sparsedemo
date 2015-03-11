@@ -27,8 +27,9 @@ int gfx_init(struct gfx *gfx) {
     return 0;
 }
 
-int gfx_paint(struct gfx *gfx) {
+int gfx_paint(struct gfx *gfx, uint64_t frame_number) {
     (void)gfx;
+    (void)frame_number;
 
     float clear_color[] = { 0.2, 0.4, 0.7, 1.0 };
     glClearBufferfv(GL_COLOR, 0, clear_color);
