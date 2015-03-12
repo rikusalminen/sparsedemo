@@ -24,7 +24,7 @@ static int native_format = 0;
 struct gfx;
 extern struct gfx gfx_;
 int gfx_init(struct gfx *gfx);
-int gfx_paint(struct gfx *gfx, uint64_t frame_number);
+int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number);
 int gfx_quit(struct gfx *gfx);
 
 static struct painter {
@@ -102,8 +102,15 @@ static void *painter_main(void *ptr) {
         last_frame_time = (uint64_t)frametime.tv_sec * nanoseconds +
             (uint64_t)frametime.tv_nsec;
 
+        // get window size
+        //int awidth = ANativeWindow_getWidth(painter->native_window);
+        //int aheight = ANativeWindow_getHeight(painter->native_window);
+        int width, height;
+        eglQuerySurface(display, painter->surface, EGL_WIDTH, &width);
+        eglQuerySurface(display, painter->surface, EGL_HEIGHT, &height);
+
         // paint the screen
-        if(gfx_paint(&gfx_, frame_number) != 0)
+        if(gfx_paint(&gfx_, width, height, frame_number) != 0)
             error = -1;
         else
             eglSwapBuffers(display, painter->surface);
@@ -176,8 +183,6 @@ static int painter_stop(struct painter *painter) {
 
     pthread_mutex_destroy(&painter->lock);
     pthread_cond_destroy(&painter->state_changed);
-
-    memset(painter, 0, sizeof(*painter));
 
     return ret == (void*)painter ? 0 : -1;
 }
@@ -403,6 +408,7 @@ static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* nati
     EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attribs);
 
     struct painter *painter = (struct painter*)activity->instance;
+    memset(painter, 0, sizeof(*painter));
     painter->native_window = native_window;
     painter->context = context;
     painter->surface = surface;
