@@ -15,19 +15,36 @@ struct gfx {
 
     unsigned vbo;
     unsigned vao;
+
+    unsigned texture;
 };
 
 struct gfx gfx_;
 
 static const char *vertex_src = ""
     "#version 450\n"
-    "in vec4 pos;"
-    "void main() { gl_Position = pos; }";
+    //"in vec4 pos;"
+    //"void main() { gl_Position = pos; }";
+
+    "void main() {"
+        "int u = gl_VertexID >> 1; int v = (gl_VertexID & 1)^1;"
+        "gl_Position = vec4(-1.0 + 2.0 * u, -1.0 + 2.0 * v, 0.0, 1.0);"
+    "}";
 
 static const char *frag_src = ""
     "#version 450\n"
+    "#extension GL_EXT_sparse_texture2 : enable\n"
+    "layout(location = 0) uniform sampler2D tex;"
     "out vec4 color;"
-    "void main() { color = vec4(1.0, 1.0, 1.0, 1.0); }";
+    "void main() {"
+        "ivec2 tex_size = textureSize(tex, 0);"
+        "if(gl_FragCoord.x > tex_size.x || gl_FragCoord.y > tex_size.y) discard;"
+        "vec4 texel = vec4(1.0, 0.0, 1.0, 1.0);"
+        "ivec2 tex_coord = ivec2(gl_FragCoord.x, gl_FragCoord.y);"
+        "int code = sparseTexelFetchEXT(tex, tex_coord, 0, texel);"
+        "if(sparseTexelsResidentEXT(code)) color = texel;"
+        "else color = vec4(1.0, 1.0, 0.0, 1.0);"
+    "}";
 
 int gfx_init(struct gfx *gfx) {
     memset(gfx, 0, sizeof(struct gfx));
@@ -40,26 +57,99 @@ int gfx_init(struct gfx *gfx) {
     LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
     LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
 
-    float triangle[] = {
-        0.0, -1.0, 0.0, 1.0,
-        -1.0, 1.0, 0.0, 1.0,
-        1.0, 1.0, 0.0, 1.0,
-    };
+    int num_compressed_formats;
+    glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &num_compressed_formats);
 
-    glGenBuffers(1, &gfx->vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, gfx->vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle, GL_STATIC_DRAW);
+    int compressed_formats[num_compressed_formats];
+    glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS, compressed_formats);
+
+    LOGI("GL_NUM_COMPRESSED_TEXTURE_FORMATS: %d\n", num_compressed_formats);
+    for(int i = 0; i < num_compressed_formats; ++i) {
+        int fmt = compressed_formats[i];
+        int block_width, block_height, block_size;
+
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_TEXTURE_COMPRESSED_BLOCK_WIDTH,
+            sizeof(int), &block_width);
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_TEXTURE_COMPRESSED_BLOCK_HEIGHT,
+            sizeof(int), &block_height);
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_TEXTURE_COMPRESSED_BLOCK_SIZE,
+            sizeof(int), &block_size);
+
+        int num_page_sizes = 0;
+
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_NUM_VIRTUAL_PAGE_SIZES_ARB,
+            sizeof(int), &num_page_sizes);
+
+        int page_size_x[num_page_sizes],
+            page_size_y[num_page_sizes],
+            page_size_z[num_page_sizes];
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_VIRTUAL_PAGE_SIZE_X_ARB,
+            num_page_sizes * sizeof(int), page_size_x);
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_VIRTUAL_PAGE_SIZE_Y_ARB,
+            num_page_sizes * sizeof(int), page_size_y);
+        glGetInternalformativ(
+            GL_TEXTURE_2D, fmt,
+            GL_VIRTUAL_PAGE_SIZE_Z_ARB,
+            num_page_sizes * sizeof(int), page_size_z);
+
+        LOGI("\t%X  block %2d x %2d  (%3d bits):  %d page sizes  (%3d x %3d x %3d)",
+            fmt,
+            block_width, block_height, block_size,
+            num_page_sizes,
+            page_size_x[0], page_size_y[0], page_size_z[0]
+            );
+    }
+
+    //float triangle[] = {
+        //0.0, -1.0, 0.0, 1.0,
+        //-1.0, 1.0, 0.0, 1.0,
+        //1.0, 1.0, 0.0, 1.0,
+    //};
+
+    //glGenBuffers(1, &gfx->vbo);
+    //glBindBuffer(GL_ARRAY_BUFFER, gfx->vbo);
+    //glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle, GL_STATIC_DRAW);
 
     glGenVertexArrays(1, &gfx->vao);
 
-    glBindVertexArray(gfx->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, gfx->vbo);
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4*sizeof(float), 0);
-    glEnableVertexAttribArray(0);
+    //glBindVertexArray(gfx->vao);
+    //glBindBuffer(GL_ARRAY_BUFFER, gfx->vbo);
+    //glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4*sizeof(float), 0);
+    //glEnableVertexAttribArray(0);
 
     gfx->program = shader_compile(vertex_src, 0, 0, 0, frag_src);
     if(gfx->program == 0)
         return -1;
+
+    GLenum tex_format = GL_RGBA8;
+    int pgsz_index = 0;
+    int page_width = 128, page_height = 128, page_depth = 1;
+    (void)page_depth;
+
+    glGenTextures(1, &gfx->texture);
+    glBindTexture(GL_TEXTURE_2D, gfx->texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SPARSE_ARB, GL_TRUE);
+    glTexParameteri(GL_TEXTURE_2D, GL_VIRTUAL_PAGE_SIZE_INDEX_ARB, pgsz_index);
+
+    int tex_width = 2 * page_width, tex_height = 2 * page_height;
+    glTexStorage2D(GL_TEXTURE_2D, 1, tex_format, tex_width, tex_height);
+
+    glTexPageCommitmentARB(GL_TEXTURE_2D, 0,
+        0, 0, 0,
+        page_width, page_height, page_depth,
+        GL_TRUE);
 
     return 0;
 }
@@ -78,8 +168,13 @@ int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
     glClearBufferfv(GL_COLOR, 0, clear_color);
 
     glUseProgram(gfx->program);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gfx->texture);
+    glUniform1i(0, 0);
+
     glBindVertexArray(gfx->vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     GLenum glerror = GL_NO_ERROR;
     if((glerror = glGetError()) != GL_NO_ERROR) {
