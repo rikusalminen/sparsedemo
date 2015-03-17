@@ -9,6 +9,7 @@ LOCAL_CFLAGS+=-g
 LOCAL_SRC_FILES=\
 	main.c \
 	gfx.c \
+	texmmap.c \
 	shader.c \
 	gldebug.c \
 	glxw.c

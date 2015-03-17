@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <string.h>
 
 #include <GLXW/glxw.h>
@@ -10,6 +11,10 @@ extern void APIENTRY gl_debug_callback(GLenum, GLenum, GLuint, GLenum, GLsizei, 
 
 extern unsigned shader_compile(const char *vert, const char *tess_ctrl, const char *tess_eval, const char *geom, const char *frag);
 
+struct texmmap;
+void* texmmap_ptr(struct texmmap* texmmap);
+uint64_t texmmap_size(const struct texmmap *texmmap);
+
 struct gfx {
     unsigned program;
 
@@ -17,6 +22,8 @@ struct gfx {
     unsigned vao;
 
     unsigned texture;
+
+    struct texmmap *texmmap;
 };
 
 struct gfx gfx_;
@@ -46,8 +53,9 @@ static const char *frag_src = ""
         "else color = vec4(1.0, 1.0, 0.0, 1.0);"
     "}";
 
-int gfx_init(struct gfx *gfx) {
+int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     memset(gfx, 0, sizeof(struct gfx));
+    gfx->texmmap = texmmap;
 
     void *debug_data = NULL;
     glDebugMessageCallback(&gl_debug_callback, debug_data);
@@ -56,6 +64,12 @@ int gfx_init(struct gfx *gfx) {
     LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
     LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
     LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
+
+    int tex_format = GL_COMPRESSED_RGBA_ASTC_8x8_KHR;
+    int pgsz_index = -1;
+    int page_width = 0, page_height = 0, page_depth = 0;
+    int block_width = 0, block_height = 0, block_size = 0;
+    (void)block_width; (void)block_height; (void)block_size;
 
     int num_compressed_formats;
     glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &num_compressed_formats);
@@ -66,20 +80,20 @@ int gfx_init(struct gfx *gfx) {
     LOGI("GL_NUM_COMPRESSED_TEXTURE_FORMATS: %d\n", num_compressed_formats);
     for(int i = 0; i < num_compressed_formats; ++i) {
         int fmt = compressed_formats[i];
-        int block_width, block_height, block_size;
+        int block_x, block_y, block_sz;
 
         glGetInternalformativ(
             GL_TEXTURE_2D, fmt,
             GL_TEXTURE_COMPRESSED_BLOCK_WIDTH,
-            sizeof(int), &block_width);
+            sizeof(int), &block_x);
         glGetInternalformativ(
             GL_TEXTURE_2D, fmt,
             GL_TEXTURE_COMPRESSED_BLOCK_HEIGHT,
-            sizeof(int), &block_height);
+            sizeof(int), &block_y);
         glGetInternalformativ(
             GL_TEXTURE_2D, fmt,
             GL_TEXTURE_COMPRESSED_BLOCK_SIZE,
-            sizeof(int), &block_size);
+            sizeof(int), &block_sz);
 
         int num_page_sizes = 0;
 
@@ -104,9 +118,19 @@ int gfx_init(struct gfx *gfx) {
             GL_VIRTUAL_PAGE_SIZE_Z_ARB,
             num_page_sizes * sizeof(int), page_size_z);
 
+        if(tex_format == fmt) {
+            pgsz_index = 0;
+            page_width = page_size_x[pgsz_index];
+            page_height = page_size_y[pgsz_index];
+            page_depth = page_size_z[pgsz_index];
+            block_width = block_x;
+            block_height = block_y;
+            block_size = block_sz;
+        }
+
         LOGI("\t%X  block %2d x %2d  (%3d bits):  %d page sizes  (%3d x %3d x %3d)",
             fmt,
-            block_width, block_height, block_size,
+            block_x, block_y, block_sz,
             num_page_sizes,
             page_size_x[0], page_size_y[0], page_size_z[0]
             );
@@ -133,11 +157,6 @@ int gfx_init(struct gfx *gfx) {
     if(gfx->program == 0)
         return -1;
 
-    GLenum tex_format = GL_RGBA8;
-    int pgsz_index = 0;
-    int page_width = 128, page_height = 128, page_depth = 1;
-    (void)page_depth;
-
     glGenTextures(1, &gfx->texture);
     glBindTexture(GL_TEXTURE_2D, gfx->texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SPARSE_ARB, GL_TRUE);
@@ -146,10 +165,27 @@ int gfx_init(struct gfx *gfx) {
     int tex_width = 2 * page_width, tex_height = 2 * page_height;
     glTexStorage2D(GL_TEXTURE_2D, 1, tex_format, tex_width, tex_height);
 
-    glTexPageCommitmentARB(GL_TEXTURE_2D, 0,
+    int level = 0;
+    glTexPageCommitmentARB(
+        GL_TEXTURE_2D,
+        level,
         0, 0, 0,
         page_width, page_height, page_depth,
         GL_TRUE);
+
+    void *texptr = texmmap_ptr(gfx->texmmap);
+    uint64_t texsize = texmmap_size(gfx->texmmap);
+    if(texptr) {
+        const uint64_t header_size = 16;
+        const char *ptr = (const char *)texptr + header_size;
+        glCompressedTexSubImage2D(
+            GL_TEXTURE_2D,
+            level,
+            0, 0,
+            page_width, page_height,
+            tex_format, texsize - header_size,
+            ptr);
+    }
 
     return 0;
 }

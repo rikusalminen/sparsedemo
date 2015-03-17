@@ -21,9 +21,14 @@ static EGLDisplay display = 0;
 static EGLConfig config = 0;
 static int native_format = 0;
 
+struct texmmap;
+extern struct texmmap texmmap_;
+int texmmap_open(const char *dir, const char *filename, struct texmmap* texmmap);
+int texmmap_close(struct texmmap* texmmap);
+
 struct gfx;
 extern struct gfx gfx_;
-int gfx_init(struct gfx *gfx);
+int gfx_init(struct gfx *gfx, struct texmmap *texmmap);
 int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number);
 int gfx_quit(struct gfx *gfx);
 
@@ -48,7 +53,7 @@ static void *painter_main(void *ptr) {
     eglSwapInterval(display, 1);
 
     int error = 0;
-    if(gfx_init(&gfx_) != 0)
+    if(gfx_init(&gfx_, &texmmap_) != 0)
         error = -1;
 
     uint64_t frame_number = 0;
@@ -351,6 +356,8 @@ static void onDestroy(ANativeActivity* activity)
     (void)activity;
     LOGI("ANativeActivity onDestroy");
 
+    texmmap_close(&texmmap_);
+
     egl_quit();
 }
 
@@ -513,4 +520,10 @@ void ANativeActivity_onCreate(
     activity->instance = &painter_;
 
     egl_init();
+
+    const char *tex_file_name = "scandinavia512.astc";
+    if(texmmap_open(activity->internalDataPath, tex_file_name, &texmmap_) != 0) {
+        LOGW("**** Can't mmap texture file %s/%s", activity->internalDataPath, tex_file_name);
+        ANativeActivity_finish(activity);
+    }
 }
