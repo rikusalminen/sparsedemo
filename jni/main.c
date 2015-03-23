@@ -521,7 +521,8 @@ void ANativeActivity_onCreate(
 
     egl_init();
 
-    const char *tex_file_name = "scandinavia512.astc";
+    //const char *tex_file_name = "scandinavia512.astc";
+    const char *tex_file_name = "europe1024.astc";
     if(texmmap_open(activity->internalDataPath, tex_file_name, &texmmap_) != 0) {
         LOGW("**** Can't mmap texture file %s/%s", activity->internalDataPath, tex_file_name);
         ANativeActivity_finish(activity);
