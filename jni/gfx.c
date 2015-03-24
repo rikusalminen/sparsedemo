@@ -1,11 +1,15 @@
 #include <stdint.h>
 #include <string.h>
+#include <assert.h>
 
 #include <GLXW/glxw.h>
 
 #include <android/log.h>
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, __FILE__, __VA_ARGS__))
 #define LOGW(...) ((void)__android_log_print(ANDROID_LOG_WARN, __FILE__, __VA_ARGS__))
+
+#define XFER_NUM_BUFFERS (16)
+#define XFER_BUFFER_SIZE (2 * 1024*1024)
 
 extern void APIENTRY gl_debug_callback(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar *, const void*);
 
@@ -26,6 +30,27 @@ struct astc_header
         uint8_t zsize[3];
 };
 
+struct xfer {
+    uint64_t size;
+    void *pbo_buffer;
+    unsigned pbo;
+
+    GLsync syncpt; // NOTE: opaque pointer
+
+    void *src_ptr;
+    int tex_format;
+
+    int src_x, src_y;
+    int width, height;
+    int src_pitch;
+
+    unsigned dst_tex;
+    int dst_x, dst_y;
+
+    int page_width, page_height, page_depth;
+    int block_width, block_height, block_size;
+};
+
 struct gfx {
     unsigned program;
 
@@ -40,6 +65,8 @@ struct gfx {
     int tex_width, tex_height;
     int page_width, page_height, page_depth;
     int block_width, block_height, block_size;
+
+    struct xfer xfers[XFER_NUM_BUFFERS];
 };
 
 struct gfx gfx_;
@@ -88,6 +115,182 @@ static int blockblit2d(
     }
 
     return rows * cols;
+}
+
+static int xfer_init(struct xfer *xfer, uint64_t xfer_size) {
+    xfer->size = xfer_size;
+    xfer->syncpt = 0;
+
+    GLbitfield storage_flags =
+        GL_CLIENT_STORAGE_BIT |
+        GL_MAP_WRITE_BIT |
+        GL_MAP_PERSISTENT_BIT |
+        GL_MAP_COHERENT_BIT;
+
+    glGenBuffers(1, &xfer->pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer->pbo);
+    glBufferStorage(GL_PIXEL_UNPACK_BUFFER, xfer_size, NULL, storage_flags);
+
+    GLbitfield map_flags =
+        GL_MAP_WRITE_BIT |
+        GL_MAP_PERSISTENT_BIT |
+        GL_MAP_COHERENT_BIT;
+    void *ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, xfer_size, map_flags);
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    xfer->pbo_buffer = ptr;
+
+    return 0;
+}
+
+static int xfer_start(
+    struct xfer *xfer,
+    unsigned dst_tex,
+    unsigned tex_format,
+    void *src_ptr, int src_pitch,
+    int src_x, int src_y,
+    int dst_x, int dst_y,
+    int block_width, int block_height, int block_size,
+    int width, int height) {
+
+    uint64_t size_bytes = width/block_width * height/block_height * block_size/8;
+
+    assert(size_bytes < xfer->size);
+    assert(xfer->syncpt == 0);
+
+    xfer->dst_tex = dst_tex;
+    xfer->tex_format = tex_format;
+
+    xfer->src_ptr = src_ptr;
+    xfer->src_pitch = src_pitch;
+
+    xfer->src_x = src_x; xfer->src_y = src_y;
+    xfer->dst_x = dst_x; xfer->dst_y = dst_y;
+
+    xfer->block_width = block_width;
+    xfer->block_height = block_height;
+    xfer->block_size = block_size;
+    xfer->width = width;
+    xfer->height = height;
+
+    return 0;
+}
+
+static int xfer_blit(struct xfer *xfer) {
+    int dst_pitch = (xfer->width / xfer->block_width) * (xfer->block_size/8);
+
+    blockblit2d(
+        xfer->src_ptr, xfer->src_pitch,
+        xfer->src_x, xfer->src_y,
+        xfer->pbo_buffer, dst_pitch,
+        xfer->block_width, xfer->block_height, (xfer->block_size/8),
+        xfer->width, xfer->height);
+
+    return 0;
+}
+
+static int xfer_upload(struct xfer *xfer) {
+    glBindTexture(GL_TEXTURE_2D, xfer->dst_tex);
+
+    glTexPageCommitmentARB(
+        GL_TEXTURE_2D,
+        0, // XXX: dst_level
+        xfer->dst_x, xfer->dst_y, 0, // XXX: xfer->dst_z
+        xfer->width, xfer->height, 1, // XXX: xfer->depth
+        GL_TRUE);
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer->pbo);
+
+    uint64_t bytes = xfer->width/xfer->block_width * xfer->height/xfer->block_height * xfer->block_size/8;
+    glCompressedTexSubImage2D(
+        GL_TEXTURE_2D,
+        0, // XXX: dst_level
+        xfer->dst_x, xfer->dst_y,
+        xfer->width,
+        xfer->height,
+        xfer->tex_format,
+        bytes,
+        NULL);
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    GLbitfield fence_flags = 0; // must be zero
+    GLsync syncpt = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, fence_flags);
+
+    xfer->syncpt = syncpt;
+
+    return 0;
+}
+
+static int xfer_finish(
+    struct xfer *xfer,
+    int server_wait,
+    int client_wait, int flush, uint64_t client_timeout_ns) {
+    int status = 0;
+
+    if(client_wait) {
+        GLenum cond = glClientWaitSync(
+            xfer->syncpt,
+            flush ? GL_SYNC_FLUSH_COMMANDS_BIT : 0,
+            client_timeout_ns);
+
+        switch(cond) {
+            case GL_ALREADY_SIGNALED:
+            case GL_CONDITION_SATISFIED:
+                status = 1;
+                break;
+
+            case GL_TIMEOUT_EXPIRED:
+                status = 0;
+
+            case GL_WAIT_FAILED: // fall through
+            default:
+                status = -1;
+                break;
+        }
+    }
+
+    if(server_wait) {
+        glWaitSync(xfer->syncpt, 0 /* must be zero */, GL_TIMEOUT_IGNORED);
+    }
+
+    if(!client_wait && status == 0) {
+        int sync_status = 0;
+        glGetSynciv(xfer->syncpt, GL_SYNC_STATUS, sizeof(int), NULL, &sync_status);
+
+        switch(sync_status) {
+            case GL_SIGNALED:
+                status = 1;
+                break;
+
+            case GL_UNSIGNALED:
+                status = 0;
+                break;
+
+            default:
+                status = -1;
+        }
+    }
+
+    if(status == 1) {
+        glDeleteSync(xfer->syncpt);
+        xfer->syncpt = 0;
+    }
+
+    return status;
+}
+
+static int xfer_free(struct xfer *xfer) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer->pbo);
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glDeleteBuffers(1, &xfer->pbo);
+
+    glDeleteSync(xfer->syncpt);
+
+    return 0;
 }
 
 static int gfx_page_commit(struct gfx *gfx, int page_x, int page_y) {
@@ -152,6 +355,11 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     LOGI("GL_VENDOR: %s", glGetString(GL_VENDOR));
     LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
     LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
+
+    for(int i = 0; i < XFER_NUM_BUFFERS; ++i) {
+        if(xfer_init(&gfx->xfers[i], XFER_BUFFER_SIZE) != 0)
+            return -1;
+    }
 
     int tex_format = GL_COMPRESSED_RGBA_ASTC_8x8_KHR;
     int pgsz_index = -1;
@@ -274,12 +482,37 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     gfx->block_height = block_height;
     gfx->block_size = block_size;
 
-    gfx_page_commit(gfx, 0, 0);
-    gfx_page_commit(gfx, 1, 0);
-    gfx_page_commit(gfx, 0, 1);
-    gfx_page_commit(gfx, 1, 1);
+    if(0) {
+        gfx_page_commit(gfx, 0, 0);
+        gfx_page_commit(gfx, 1, 0);
+        gfx_page_commit(gfx, 2, 0);
+        gfx_page_commit(gfx, 0, 1);
+        gfx_page_commit(gfx, 1, 1);
+        gfx_page_commit(gfx, 2, 1);
 
-    gfx_page_uncommit(gfx, 1, 1);
+        gfx_page_uncommit(gfx, 1, 1);
+        gfx_page_commit(gfx, 1, 1);
+    }
+
+    if(1) {
+        struct xfer *xfer = &gfx->xfers[0];
+
+        int src_pitch = (gfx->tex_width/gfx->block_width) * (gfx->block_size/8);
+
+        xfer_start(
+            xfer,
+            gfx->texture, gfx->tex_format,
+            texmmap_ptr(gfx->texmmap), src_pitch,
+            16 * gfx->page_width, 8 * page_height,
+            0, 0,
+            gfx->block_width, gfx->block_height, gfx->block_size,
+            4 * gfx->page_width, 4 * gfx->page_width);
+
+        xfer_blit(xfer);
+        xfer_upload(xfer);
+
+        xfer_finish(xfer, 1, 0, 0, 0);
+    }
 
     return 0;
 }
@@ -316,6 +549,9 @@ int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
 }
 
 int gfx_quit(struct gfx *gfx) {
+    for(int i = 0; i < XFER_NUM_BUFFERS; ++i)
+        xfer_free(&gfx->xfers[i]);
+
     glDeleteVertexArrays(1, &gfx->vao);
     glDeleteBuffers(1, &gfx->vbo);
 
