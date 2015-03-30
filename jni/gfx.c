@@ -1,15 +1,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include <GLXW/glxw.h>
 
 #include <android/log.h>
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, __FILE__, __VA_ARGS__))
 #define LOGW(...) ((void)__android_log_print(ANDROID_LOG_WARN, __FILE__, __VA_ARGS__))
-
-#define XFER_NUM_BUFFERS (16)
-#define XFER_BUFFER_SIZE (2 * 1024*1024)
 
 extern void APIENTRY gl_debug_callback(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar *, const void*);
 
@@ -30,7 +28,20 @@ struct astc_header
         uint8_t zsize[3];
 };
 
-struct xfer {
+#define XFER_NUM_BUFFERS (8)
+#define XFER_BUFFER_SIZE (2 * 1024*1024)
+
+#define XFER_NUM_QUEUES         4
+#define XFER_QUEUE_IDLE         0
+#define XFER_QUEUE_READ         1
+#define XFER_QUEUE_UPLOAD       2
+#define XFER_QUEUE_WAIT         3
+
+#define XFER_QUEUE_MAX_SIZE  (XFER_NUM_BUFFERS+1) // XXX: queue must never get full!
+
+#define XFER_NUM_THREADS        4
+
+struct xfer_buffer {
     uint64_t size;
     void *pbo_buffer;
     unsigned pbo;
@@ -51,6 +62,23 @@ struct xfer {
     int block_width, block_height, block_size;
 };
 
+struct xfer_queue {
+    pthread_mutex_t queue_lock;
+    int stopped;
+
+    int queues[XFER_NUM_QUEUES][XFER_QUEUE_MAX_SIZE];
+    int queue_counters[XFER_NUM_QUEUES][2];
+    int queue_waiting[XFER_NUM_QUEUES];
+    pthread_cond_t queue_not_empty[XFER_NUM_QUEUES];
+};
+
+struct xfer {
+    struct xfer_buffer buffers[XFER_NUM_BUFFERS];
+    struct xfer_queue queue;
+
+    pthread_t threads[XFER_NUM_THREADS];
+};
+
 struct gfx {
     unsigned program;
 
@@ -66,7 +94,7 @@ struct gfx {
     int page_width, page_height, page_depth;
     int block_width, block_height, block_size;
 
-    struct xfer xfers[XFER_NUM_BUFFERS];
+    struct xfer xfer;
 };
 
 struct gfx gfx_;
@@ -117,9 +145,9 @@ static int blockblit2d(
     return rows * cols;
 }
 
-static int xfer_init(struct xfer *xfer, uint64_t xfer_size) {
-    xfer->size = xfer_size;
-    xfer->syncpt = 0;
+static int xfer_buffer_init(struct xfer_buffer *xfer_buffer, uint64_t xfer_size) {
+    xfer_buffer->size = xfer_size;
+    xfer_buffer->syncpt = 0;
 
     GLbitfield storage_flags =
         GL_CLIENT_STORAGE_BIT |
@@ -127,8 +155,8 @@ static int xfer_init(struct xfer *xfer, uint64_t xfer_size) {
         GL_MAP_PERSISTENT_BIT |
         GL_MAP_COHERENT_BIT;
 
-    glGenBuffers(1, &xfer->pbo);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer->pbo);
+    glGenBuffers(1, &xfer_buffer->pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer_buffer->pbo);
     glBufferStorage(GL_PIXEL_UNPACK_BUFFER, xfer_size, NULL, storage_flags);
 
     GLbitfield map_flags =
@@ -139,13 +167,13 @@ static int xfer_init(struct xfer *xfer, uint64_t xfer_size) {
 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    xfer->pbo_buffer = ptr;
+    xfer_buffer->pbo_buffer = ptr;
 
     return 0;
 }
 
 static int xfer_start(
-    struct xfer *xfer,
+    struct xfer_buffer *xfer_buffer,
     unsigned dst_tex,
     unsigned tex_format,
     void *src_ptr, int src_pitch,
@@ -156,60 +184,62 @@ static int xfer_start(
 
     uint64_t size_bytes = width/block_width * height/block_height * block_size/8;
 
-    assert(size_bytes < xfer->size);
-    assert(xfer->syncpt == 0);
+    assert(size_bytes < xfer_buffer->size);
+    assert(xfer_buffer->syncpt == 0);
 
-    xfer->dst_tex = dst_tex;
-    xfer->tex_format = tex_format;
+    xfer_buffer->dst_tex = dst_tex;
+    xfer_buffer->tex_format = tex_format;
 
-    xfer->src_ptr = src_ptr;
-    xfer->src_pitch = src_pitch;
+    xfer_buffer->src_ptr = src_ptr;
+    xfer_buffer->src_pitch = src_pitch;
 
-    xfer->src_x = src_x; xfer->src_y = src_y;
-    xfer->dst_x = dst_x; xfer->dst_y = dst_y;
+    xfer_buffer->src_x = src_x; xfer_buffer->src_y = src_y;
+    xfer_buffer->dst_x = dst_x; xfer_buffer->dst_y = dst_y;
 
-    xfer->block_width = block_width;
-    xfer->block_height = block_height;
-    xfer->block_size = block_size;
-    xfer->width = width;
-    xfer->height = height;
+    xfer_buffer->block_width = block_width;
+    xfer_buffer->block_height = block_height;
+    xfer_buffer->block_size = block_size;
+    xfer_buffer->width = width;
+    xfer_buffer->height = height;
 
     return 0;
 }
 
-static int xfer_blit(struct xfer *xfer) {
-    int dst_pitch = (xfer->width / xfer->block_width) * (xfer->block_size/8);
+static int xfer_buffer_blit(struct xfer_buffer *xfer_buffer) {
+    int dst_pitch = (xfer_buffer->width / xfer_buffer->block_width) * (xfer_buffer->block_size/8);
 
     blockblit2d(
-        xfer->src_ptr, xfer->src_pitch,
-        xfer->src_x, xfer->src_y,
-        xfer->pbo_buffer, dst_pitch,
-        xfer->block_width, xfer->block_height, (xfer->block_size/8),
-        xfer->width, xfer->height);
+        xfer_buffer->src_ptr, xfer_buffer->src_pitch,
+        xfer_buffer->src_x, xfer_buffer->src_y,
+        xfer_buffer->pbo_buffer, dst_pitch,
+        xfer_buffer->block_width, xfer_buffer->block_height, (xfer_buffer->block_size/8),
+        xfer_buffer->width, xfer_buffer->height);
 
     return 0;
 }
 
-static int xfer_upload(struct xfer *xfer) {
-    glBindTexture(GL_TEXTURE_2D, xfer->dst_tex);
+static int xfer_buffer_upload(struct xfer_buffer *xfer_buffer) {
+    glBindTexture(GL_TEXTURE_2D, xfer_buffer->dst_tex);
 
     glTexPageCommitmentARB(
         GL_TEXTURE_2D,
         0, // XXX: dst_level
-        xfer->dst_x, xfer->dst_y, 0, // XXX: xfer->dst_z
-        xfer->width, xfer->height, 1, // XXX: xfer->depth
+        xfer_buffer->dst_x, xfer_buffer->dst_y, 0, // XXX: xfer_buffer->dst_z
+        xfer_buffer->width, xfer_buffer->height, 1, // XXX: xfer_buffer->depth
         GL_TRUE);
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer->pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer_buffer->pbo);
 
-    uint64_t bytes = xfer->width/xfer->block_width * xfer->height/xfer->block_height * xfer->block_size/8;
+    uint64_t bytes = xfer_buffer->width/xfer_buffer->block_width *
+        xfer_buffer->height/xfer_buffer->block_height *
+        xfer_buffer->block_size/8;
     glCompressedTexSubImage2D(
         GL_TEXTURE_2D,
         0, // XXX: dst_level
-        xfer->dst_x, xfer->dst_y,
-        xfer->width,
-        xfer->height,
-        xfer->tex_format,
+        xfer_buffer->dst_x, xfer_buffer->dst_y,
+        xfer_buffer->width,
+        xfer_buffer->height,
+        xfer_buffer->tex_format,
         bytes,
         NULL);
 
@@ -218,20 +248,20 @@ static int xfer_upload(struct xfer *xfer) {
     GLbitfield fence_flags = 0; // must be zero
     GLsync syncpt = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, fence_flags);
 
-    xfer->syncpt = syncpt;
+    xfer_buffer->syncpt = syncpt;
 
     return 0;
 }
 
-static int xfer_finish(
-    struct xfer *xfer,
+static int xfer_buffer_finish(
+    struct xfer_buffer *xfer_buffer,
     int server_wait,
     int client_wait, int flush, uint64_t client_timeout_ns) {
     int status = 0;
 
     if(client_wait) {
         GLenum cond = glClientWaitSync(
-            xfer->syncpt,
+            xfer_buffer->syncpt,
             flush ? GL_SYNC_FLUSH_COMMANDS_BIT : 0,
             client_timeout_ns);
 
@@ -252,12 +282,12 @@ static int xfer_finish(
     }
 
     if(server_wait) {
-        glWaitSync(xfer->syncpt, 0 /* must be zero */, GL_TIMEOUT_IGNORED);
+        glWaitSync(xfer_buffer->syncpt, 0 /* must be zero */, GL_TIMEOUT_IGNORED);
     }
 
     if(!client_wait && status == 0) {
         int sync_status = 0;
-        glGetSynciv(xfer->syncpt, GL_SYNC_STATUS, sizeof(int), NULL, &sync_status);
+        glGetSynciv(xfer_buffer->syncpt, GL_SYNC_STATUS, sizeof(int), NULL, &sync_status);
 
         switch(sync_status) {
             case GL_SIGNALED:
@@ -274,23 +304,200 @@ static int xfer_finish(
     }
 
     if(status == 1) {
-        glDeleteSync(xfer->syncpt);
-        xfer->syncpt = 0;
+        glDeleteSync(xfer_buffer->syncpt);
+        xfer_buffer->syncpt = 0;
     }
 
     return status;
 }
 
-static int xfer_free(struct xfer *xfer) {
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer->pbo);
+static int xfer_buffer_free(struct xfer_buffer *xfer_buffer) {
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, xfer_buffer->pbo);
     glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    glDeleteBuffers(1, &xfer->pbo);
+    glDeleteBuffers(1, &xfer_buffer->pbo);
 
-    glDeleteSync(xfer->syncpt);
+    glDeleteSync(xfer_buffer->syncpt);
 
     return 0;
+}
+
+static int xfer_queue_stop(struct xfer_queue *queue) {
+    pthread_mutex_lock(&queue->queue_lock);
+
+    queue->stopped = 1;
+    for(int i = 0; i < XFER_NUM_QUEUES; ++i)
+        pthread_cond_broadcast(&queue->queue_not_empty[i]);
+
+    pthread_mutex_unlock(&queue->queue_lock);
+
+    return 0;
+}
+
+static int xfer_queue_get(
+    struct xfer_queue *queue,
+    int queue_num,
+    int wait,
+    int *output, int max_out) {
+    assert(output && max_out);
+
+    pthread_mutex_lock(&queue->queue_lock);
+
+    int rd = -1, wr = -1;
+    int got = 0;
+    int stopped = 0;
+    while(!stopped) {
+        rd = queue->queue_counters[queue_num][0];
+        wr = queue->queue_counters[queue_num][1];
+        stopped = queue->stopped;
+
+        if(stopped) {
+            break;
+        } else if(rd == wr) { // queue is empty
+            if(wait) {
+                queue->queue_waiting[queue_num] += 1;
+                pthread_cond_wait(&queue->queue_not_empty[queue_num], &queue->queue_lock);
+                queue->queue_waiting[queue_num] -= 1;
+            } else {
+                break;
+            }
+        } else {
+            while(rd != wr && got < max_out) {
+                int thing = queue->queues[queue_num][rd];
+                queue->queues[queue_num][rd] = -1;
+                output[got] = thing;
+
+                got += 1;
+                rd = (rd+1) % XFER_QUEUE_MAX_SIZE;
+            }
+
+            queue->queue_counters[queue_num][0] = rd;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&queue->queue_lock);
+
+    return stopped ? -1 : got;
+}
+
+static int xfer_queue_put(struct xfer_queue *queue, int queue_num, int element) {
+    pthread_mutex_lock(&queue->queue_lock);
+
+    int rd = queue->queue_counters[queue_num][0];
+    int wr = queue->queue_counters[queue_num][1];
+    int next = (wr + 1) % XFER_QUEUE_MAX_SIZE;
+    int stopped = queue->stopped;
+
+    int result = 0;
+    if(!stopped && next != rd) { // queue not full
+        queue->queues[queue_num][wr] = element;
+        queue->queue_counters[queue_num][1] = next;
+
+        result = 1;
+
+        if(queue->queue_waiting[queue_num] > 0)
+            pthread_cond_signal(&queue->queue_not_empty[queue_num]);
+    }
+
+    pthread_mutex_unlock(&queue->queue_lock);
+
+    return stopped ? -1 : result;
+}
+
+static void* xfer_thread_main(void *arg) {
+    struct xfer *xfer = (struct xfer*)arg;
+
+    int buffer_id = -1;
+    while(xfer_queue_get(&xfer->queue, XFER_QUEUE_READ, 1, &buffer_id, 1) == 1) {
+        LOGI("**** BLITTING BUFFER: %d", buffer_id);
+        struct xfer_buffer *xfer_buffer = &xfer->buffers[buffer_id];
+        xfer_buffer_blit(xfer_buffer);
+
+        if(xfer_queue_put(&xfer->queue, XFER_QUEUE_UPLOAD, buffer_id) != 1)
+            break;
+    }
+
+    return (void*)xfer;
+}
+
+static int xfer_init(struct xfer *xfer, int buffer_size) {
+    for(int i = 0; i < XFER_NUM_BUFFERS; ++i) {
+        LOGI("**** INIT BUFFER: %d / %d", i, XFER_NUM_BUFFERS);
+        if(xfer_buffer_init(&xfer->buffers[i], buffer_size) != 0)
+            return 0;
+    }
+
+    for(int i = 0; i < XFER_NUM_QUEUES; ++i)
+        for(int j = 0; j < XFER_QUEUE_MAX_SIZE; ++j)
+            xfer->queue.queues[i][j] = -1;
+
+    for(int i = 0; i < XFER_NUM_BUFFERS; ++i) // initialize pending queue
+        xfer->queue.queues[XFER_QUEUE_IDLE][i] = i;
+    xfer->queue.queue_counters[XFER_QUEUE_IDLE][1] = XFER_NUM_BUFFERS;
+
+    for(int i = 0; i < XFER_NUM_THREADS; ++i)
+        pthread_create(&xfer->threads[i], NULL, xfer_thread_main, (void*)xfer);
+
+    return 0;
+}
+
+static int xfer_free(struct xfer *xfer) {
+    xfer_queue_stop(&xfer->queue);
+
+    int err;
+    for(int i = 0; i < XFER_NUM_THREADS; ++i) {
+        void *ret;
+        pthread_join(xfer->threads[i], &ret);
+        if(ret == 0)
+            err = -1;
+    }
+
+    for(int i = 0; i < XFER_NUM_BUFFERS; ++i)
+        xfer_buffer_free(&xfer->buffers[i]);
+
+    return err;
+}
+
+static int xfer_upload(struct xfer *xfer, int wait) {
+    int queue[XFER_QUEUE_MAX_SIZE];
+    int num = xfer_queue_get(&xfer->queue, XFER_QUEUE_UPLOAD, wait,  queue, XFER_QUEUE_MAX_SIZE);
+
+    for(int i = 0; i < num; ++i) {
+        int buffer_id = queue[i];
+        struct xfer_buffer *xfer_buffer = &xfer->buffers[buffer_id];
+
+        LOGI("**** UPLOADING BUFFER: %d", buffer_id);
+        xfer_buffer_upload(xfer_buffer);
+
+        xfer_queue_put(&xfer->queue, XFER_QUEUE_WAIT, buffer_id);
+    }
+
+    return num;
+}
+
+static int xfer_finish(struct xfer *xfer) {
+    int queue[XFER_QUEUE_MAX_SIZE];
+    int num = xfer_queue_get(&xfer->queue, XFER_QUEUE_WAIT, 0, queue, XFER_QUEUE_MAX_SIZE);
+
+    int num_finished = 0;
+    for(int i = 0; i < num; ++i) {
+        int buffer_id = queue[i];
+        struct xfer_buffer *xfer_buffer = &xfer->buffers[buffer_id];
+
+        LOGI("**** FINISHING BUFFER: %d", buffer_id);
+
+        int finished = xfer_buffer_finish(xfer_buffer, 1, 0, 0, 0);
+        if(finished) {
+            xfer_queue_put(&xfer->queue, XFER_QUEUE_IDLE, buffer_id);
+            num_finished += 1;
+        } else {
+            xfer_queue_put(&xfer->queue, XFER_QUEUE_WAIT, buffer_id);
+        }
+    }
+
+    return num_finished;
 }
 
 static int gfx_page_commit(struct gfx *gfx, int page_x, int page_y) {
@@ -356,10 +563,8 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     LOGI("GL_RENDERER: %s", glGetString(GL_RENDERER));
     LOGI("GL_EXTENSIONS: %s", glGetString(GL_EXTENSIONS));
 
-    for(int i = 0; i < XFER_NUM_BUFFERS; ++i) {
-        if(xfer_init(&gfx->xfers[i], XFER_BUFFER_SIZE) != 0)
-            return -1;
-    }
+    if(xfer_init(&gfx->xfer, XFER_BUFFER_SIZE) != 0)
+        return -1;
 
     int tex_format = GL_COMPRESSED_RGBA_ASTC_8x8_KHR;
     int pgsz_index = -1;
@@ -494,24 +699,49 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
         gfx_page_commit(gfx, 1, 1);
     }
 
-    if(1) {
-        struct xfer *xfer = &gfx->xfers[0];
+    if(0) {
+        struct xfer_buffer *xfer_buffer = &gfx->xfer.buffers[0];
 
         int src_pitch = (gfx->tex_width/gfx->block_width) * (gfx->block_size/8);
 
         xfer_start(
-            xfer,
+            xfer_buffer,
             gfx->texture, gfx->tex_format,
             texmmap_ptr(gfx->texmmap), src_pitch,
-            16 * gfx->page_width, 8 * page_height,
+            0 * gfx->page_width, 0 * page_height,
             0, 0,
             gfx->block_width, gfx->block_height, gfx->block_size,
             4 * gfx->page_width, 4 * gfx->page_width);
 
-        xfer_blit(xfer);
-        xfer_upload(xfer);
+        xfer_buffer_blit(xfer_buffer);
+        xfer_buffer_upload(xfer_buffer);
 
-        xfer_finish(xfer, 1, 0, 0, 0);
+        xfer_buffer_finish(xfer_buffer, 1, 0, 0, 0);
+    }
+
+    int pages_x = 3, pages_y = 2;
+    for(int i = 0; i < pages_x*pages_y; ++i) {
+        LOGI("**** GET IDLE BUFFER");
+
+        int buffer_id = -1;
+        xfer_queue_get(&gfx->xfer.queue, XFER_QUEUE_IDLE, 1, &buffer_id, 1);
+        struct xfer_buffer *xfer_buffer = &gfx->xfer.buffers[buffer_id];
+
+        LOGI("**** STARTING BUFFER: %d", buffer_id);
+
+        int src_pitch = (gfx->tex_width/gfx->block_width) * (gfx->block_size/8);
+        xfer_start(
+            xfer_buffer,
+            gfx->texture, gfx->tex_format,
+            texmmap_ptr(gfx->texmmap), src_pitch,
+            (i%pages_x) * gfx->page_width, (i/pages_x) * page_height,
+            (i%pages_x) * gfx->page_width, (i/pages_x) * page_height,
+            gfx->block_width, gfx->block_height, gfx->block_size,
+            1 * gfx->page_width, 1 * gfx->page_width);
+
+        xfer_queue_put(&gfx->xfer.queue, XFER_QUEUE_READ, buffer_id);
+
+        LOGI("**** STARTED BUFFER: %d", buffer_id);
     }
 
     return 0;
@@ -522,6 +752,10 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
 int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
     (void)gfx;
     (void)frame_number;
+
+    int num_finished = xfer_finish(&gfx->xfer); // finish uploads
+    if(num_finished > 0)
+        LOGI("**** TRANSFERS FINISHED: %d", num_finished);
 
     glViewport(0, 0, width, height);
 
@@ -545,12 +779,13 @@ int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
         return -1;
     }
 
+    xfer_upload(&gfx->xfer, 0); // start new uploads
+
     return 0;
 }
 
 int gfx_quit(struct gfx *gfx) {
-    for(int i = 0; i < XFER_NUM_BUFFERS; ++i)
-        xfer_free(&gfx->xfers[i]);
+    xfer_free(&gfx->xfer);
 
     glDeleteVertexArrays(1, &gfx->vao);
     glDeleteBuffers(1, &gfx->vbo);
