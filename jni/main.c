@@ -27,10 +27,20 @@ int texmmap_open(const char *dir, const char *filename, struct texmmap* texmmap)
 int texmmap_close(struct texmmap* texmmap);
 
 struct gfx;
+struct painter_state;
 extern struct gfx gfx_;
 int gfx_init(struct gfx *gfx, struct texmmap *texmmap);
-int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number);
+int gfx_paint(
+    struct gfx *gfx,
+    const struct painter_state *state,
+    int width, int height,
+    uint64_t frame_number);
 int gfx_quit(struct gfx *gfx);
+
+struct painter_state {
+    float scroll_x, scroll_y;
+    float scroll_vx, scroll_vy;
+};
 
 static struct painter {
     ANativeActivity *native_activity;
@@ -44,6 +54,8 @@ static struct painter {
     pthread_t painter_thread;
 
     int stopped, dirty, painting;
+
+    struct painter_state state;
 } painter_;
 
 static void *painter_main(void *ptr) {
@@ -92,6 +104,7 @@ static void *painter_main(void *ptr) {
             }
         }
 
+        struct painter_state state = painter->state;
         stopped = painter->stopped;
         painter->dirty = 0;
 
@@ -115,7 +128,7 @@ static void *painter_main(void *ptr) {
         eglQuerySurface(display, painter->surface, EGL_HEIGHT, &height);
 
         // paint the screen
-        if(gfx_paint(&gfx_, width, height, frame_number) != 0)
+        if(gfx_paint(&gfx_, &state, width, height, frame_number) != 0)
             error = -1;
         else
             eglSwapBuffers(display, painter->surface);
@@ -164,6 +177,20 @@ static void painter_dirty(struct painter *painter) {
     pthread_mutex_lock(&painter->lock);
     painter->dirty = 1;
     pthread_cond_signal(&painter->state_changed);
+    pthread_mutex_unlock(&painter->lock);
+}
+
+static void painter_set_state(struct painter *painter, const struct painter_state *state) {
+    pthread_mutex_lock(&painter->lock);
+
+    painter->state.scroll_x += state->scroll_x;
+    painter->state.scroll_y += state->scroll_y;
+    painter->state.scroll_vx = state->scroll_vx;
+    painter->state.scroll_vy = state->scroll_vy;
+
+    painter->dirty = 1;
+    pthread_cond_signal(&painter->state_changed);
+
     pthread_mutex_unlock(&painter->lock);
 }
 
@@ -239,8 +266,6 @@ static void handle_event_key(AInputEvent *event)
         AKeyEvent_getRepeatCount(event),
         AKeyEvent_getDownTime(event),
         AKeyEvent_getEventTime(event));
-
-    painter_paint(&painter_, 1);
 }
 
 static void handle_event_motion(AInputEvent *event)
@@ -253,16 +278,30 @@ static void handle_event_motion(AInputEvent *event)
         AMotionEvent_getEventTime(event));
 
     size_t pointer_count = AMotionEvent_getPointerCount(event);
+    size_t history_size = AMotionEvent_getHistorySize(event);
+
     for(size_t pointer_index = 0; pointer_index < pointer_count; ++pointer_index)
     {
-        LOGI("****    POINTER: %u  x: %3.3f  y: %3.3f  pressure: %3.3f",
+        LOGI("****    POINTER: %u  x: %3.3f  y: %3.3f  pressure: %3.3f  history size: %d",
             pointer_index,
             AMotionEvent_getX(event, pointer_index),
             AMotionEvent_getY(event, pointer_index),
-            AMotionEvent_getPressure(event, pointer_index));
+            AMotionEvent_getPressure(event, pointer_index),
+            (int)history_size);
+
     }
 
-    painter_paint(&painter_, 0);
+    if(pointer_count == 1 && history_size >= 1) {
+        size_t pointer_index = 0;
+
+        float dx = AMotionEvent_getX(event, pointer_index) -
+            AMotionEvent_getHistoricalX(event, pointer_index, 0);
+        float dy = AMotionEvent_getY(event, pointer_index) -
+            AMotionEvent_getHistoricalY(event, pointer_index, 0);
+
+        struct painter_state new_state = { -dx, dy, 0, 0 };
+        painter_set_state(&painter_, &new_state);
+    }
 }
 
 static void handle_event(AInputEvent *event)
@@ -421,6 +460,7 @@ static void onNativeWindowCreated(ANativeActivity* activity, ANativeWindow* nati
     painter->surface = surface;
     painter_start(painter);
 
+    painter_paint(&painter_, 1);
 }
 
 static void onNativeWindowResized(ANativeActivity* activity, ANativeWindow* native_window)
@@ -522,7 +562,8 @@ void ANativeActivity_onCreate(
     egl_init();
 
     //const char *tex_file_name = "scandinavia512.astc";
-    const char *tex_file_name = "europe1024.astc";
+    //const char *tex_file_name = "europe1024.astc";
+    const char *tex_file_name = "world16k.astc";
     if(texmmap_open(activity->internalDataPath, tex_file_name, &texmmap_) != 0) {
         LOGW("**** Can't mmap texture file %s/%s", activity->internalDataPath, tex_file_name);
         ANativeActivity_finish(activity);

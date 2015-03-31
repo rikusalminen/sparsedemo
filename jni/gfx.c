@@ -17,6 +17,11 @@ struct texmmap;
 void* texmmap_ptr(struct texmmap* texmmap);
 uint64_t texmmap_size(const struct texmmap *texmmap);
 
+struct painter_state {
+    float scroll_x, scroll_y;
+    float scroll_vx, scroll_vy;
+};
+
 struct astc_header
 {
         uint8_t magic[4];
@@ -113,12 +118,15 @@ static const char *frag_src = ""
     "#version 450\n"
     "#extension GL_EXT_sparse_texture2 : enable\n"
     "layout(location = 0) uniform sampler2D tex;"
+    "layout(location = 1) uniform int scroll_x;"
+    "layout(location = 2) uniform int scroll_y;"
     "out vec4 color;"
     "void main() {"
         "ivec2 tex_size = textureSize(tex, 0);"
-        "if(gl_FragCoord.x > tex_size.x || gl_FragCoord.y > tex_size.y) discard;"
-        "vec4 texel = vec4(1.0, 0.0, 1.0, 1.0);"
-        "ivec2 tex_coord = ivec2(gl_FragCoord.x, gl_FragCoord.y);"
+        "ivec2 tex_coord = ivec2(gl_FragCoord.x + scroll_x, gl_FragCoord.y + scroll_y);"
+        "if(tex_coord.x > tex_size.x || tex_coord.y > tex_size.y ||"
+        "       tex_coord.x < 0 || tex_coord.y < 0) discard;"
+        "vec4 texel = vec4(0.0, 1.0, 1.0, 1.0);"
         "int code = sparseTexelFetchEXT(tex, tex_coord, 0, texel);"
         "if(sparseTexelsResidentEXT(code)) color = texel;"
         "else color = vec4(1.0, 1.0, 0.0, 1.0);"
@@ -723,6 +731,8 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     for(int i = 0; i < pages_x*pages_y; ++i) {
         LOGI("**** GET IDLE BUFFER");
 
+        //if(i == 1) continue;
+
         int buffer_id = -1;
         xfer_queue_get(&gfx->xfer.queue, XFER_QUEUE_IDLE, 1, &buffer_id, 1);
         struct xfer_buffer *xfer_buffer = &gfx->xfer.buffers[buffer_id];
@@ -749,8 +759,11 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
 
 #include <math.h>
 
-int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
-    (void)gfx;
+int gfx_paint(
+    struct gfx *gfx,
+    const struct painter_state *state,
+    int width, int height,
+    uint64_t frame_number) {
     (void)frame_number;
 
     int num_finished = xfer_finish(&gfx->xfer); // finish uploads
@@ -759,9 +772,7 @@ int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
 
     glViewport(0, 0, width, height);
 
-    float x = sinf(2.0f*M_PI * (frame_number % 60) / 60.0);
-
-    float clear_color[] = { 0.2*x, 0.4*x, 0.7*x, 1.0*x };
+    float clear_color[] = { 0.2, 0.4, 0.7, 1.0 };
     glClearBufferfv(GL_COLOR, 0, clear_color);
 
     glUseProgram(gfx->program);
@@ -769,6 +780,9 @@ int gfx_paint(struct gfx *gfx, int width, int height, uint64_t frame_number) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, gfx->texture);
     glUniform1i(0, 0);
+
+    glUniform1i(1, state->scroll_x);
+    glUniform1i(2, state->scroll_y);
 
     glBindVertexArray(gfx->vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
