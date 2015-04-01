@@ -100,6 +100,8 @@ struct gfx {
     int block_width, block_height, block_size;
 
     struct xfer xfer;
+
+    int rect_page_x0, rect_page_y0, rect_page_x1, rect_page_y1;
 };
 
 struct gfx gfx_;
@@ -556,6 +558,160 @@ static int gfx_page_uncommit(struct gfx *gfx, int page_x, int page_y) {
     return 0;
 }
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+static int gfx_request_pages(
+    struct gfx *gfx,
+    int commit,
+    int page_x0, int page_y0,
+    int page_x1, int page_y1,
+    int wait) {
+
+    page_x1 = MIN(page_x1, gfx->tex_width / gfx->page_width);
+    page_y1 = MIN(page_y1, gfx->tex_height / gfx->page_height);
+
+    if(page_x1 <= page_x0 || page_y1 <= page_y0) // empty range
+        return 1;
+
+    int page_bytes = (gfx->page_width / gfx->block_width) *
+        (gfx->page_height / gfx->block_height) *
+        gfx->block_size/8;
+    if((page_x1-page_x0) * (page_y1-page_y0) * page_bytes >
+        XFER_BUFFER_SIZE) {
+        // XXX: this request is too large to fit in
+    }
+
+    LOGI("**** %s  (%d, %d) -> (%d, %d)",
+        commit ? "COMMIT" : "UNCOMMIT",
+        page_x0, page_y0, page_x1, page_y1);
+
+    if(commit) {
+        int buffer_id = -1;
+        int ret = xfer_queue_get(&gfx->xfer.queue, XFER_QUEUE_IDLE, wait, &buffer_id, 1);
+        if(ret != 1) return ret;
+
+        struct xfer_buffer *xfer_buffer = &gfx->xfer.buffers[buffer_id];
+
+        int src_pitch = (gfx->tex_width/gfx->block_width) * (gfx->block_size/8);
+        xfer_start(
+            xfer_buffer,
+            gfx->texture, gfx->tex_format,
+            texmmap_ptr(gfx->texmmap), src_pitch,
+            page_x0 * gfx->page_width, page_y0 * gfx->page_height,
+            page_x0 * gfx->page_width, page_y0 * gfx->page_height,
+            gfx->block_width, gfx->block_height, gfx->block_size,
+            (page_x1 - page_x0) * gfx->page_width,
+            (page_y1 - page_y0) * gfx->page_height);
+
+        if(xfer_queue_put(&gfx->xfer.queue, XFER_QUEUE_READ, buffer_id) != 1)
+            return -1;
+
+        return 1;
+    } else {
+        int level = 0;
+
+        glBindTexture(GL_TEXTURE_2D, gfx->texture);
+        glTexPageCommitmentARB(
+            GL_TEXTURE_2D,
+            level,
+            page_x0 * gfx->page_width, page_y0 * gfx->page_height, 0,
+            (page_x1 - page_x0) * gfx->page_width,
+            (page_y1 - page_y0) * gfx->page_height,
+            0 * gfx->page_depth,
+            GL_FALSE);
+
+        return 1;
+    }
+}
+
+static int gfx_request_rect(
+    struct gfx *gfx,
+    int page_x0, int page_y0,
+    int page_x1, int page_y1,
+    int wait) {
+
+    if( gfx->rect_page_x0 == page_x0 &&
+        gfx->rect_page_y0 == page_y0 &&
+        gfx->rect_page_x1 == page_x1 &&
+        gfx->rect_page_y1 == page_y1)
+        return 1; // nothing to commit / uncommit
+
+    if(gfx->rect_page_x1 <= gfx->rect_page_x0 ||
+        gfx->rect_page_y1 <= gfx->rect_page_y0 ||
+        page_x1 < gfx->rect_page_x0 ||
+        page_x0 > gfx->rect_page_x1 ||
+        page_y1 < gfx->rect_page_y0 ||
+        page_y0 > gfx->rect_page_y1) {
+        // no pages committed OR rectangles don't overlap
+
+        gfx_request_pages(gfx, 0,
+            gfx->rect_page_x0, gfx->rect_page_y0,
+            gfx->rect_page_x1, gfx->rect_page_y1,
+            wait);
+
+        gfx_request_pages(gfx, 1,
+            page_x0, page_y0,
+            page_x1, page_y1,
+            wait);
+    } else {
+        // width, height = positive -> commit, negative -> uncommit
+        int bottom_y = MIN(gfx->rect_page_y0, page_y0);
+        int bottom_height = gfx->rect_page_y0 - page_y0;
+
+        int top_y = MIN(gfx->rect_page_y1, page_y1);
+        int top_height = page_y1 - gfx->rect_page_y1;
+
+        int left_x = MIN(gfx->rect_page_x0, page_x0);
+        int left_width = gfx->rect_page_x0 - page_x0 ;
+
+        int right_x = MIN(gfx->rect_page_x1, page_x1);
+        int right_width = page_x1 - gfx->rect_page_x1;
+
+
+        if(bottom_height != 0) {
+            int y0 = bottom_y, y1 = bottom_y + (bottom_height < 0 ? -bottom_height : bottom_height);
+            int x0 = bottom_height < 0 ? gfx->rect_page_x0 : page_x0;
+            int x1 = bottom_height < 0 ? gfx->rect_page_x1 : page_x1;
+
+            gfx_request_pages(gfx, bottom_height > 0, x0, y0, x1, y1, wait);
+        }
+
+        if(top_height != 0) {
+            int y0 = top_y, y1 = top_y + (top_height < 0 ? -top_height : top_height);
+            int x0 = top_height < 0 ? gfx->rect_page_x0 : page_x0;
+            int x1 = top_height < 0 ? gfx->rect_page_x1 : page_x1;
+
+            gfx_request_pages(gfx, top_height > 0, x0, y0, x1, y1, wait);
+        }
+
+        if(left_width != 0) {
+            int x0 = left_x, x1 = left_x + (left_width < 0 ? -left_width : left_width);
+            int y0 = bottom_y + (bottom_height < 0 ? -bottom_height : bottom_height);
+            int y1 = top_y;
+
+            gfx_request_pages(gfx, left_width > 0, x0, y0, x1, y1, wait);
+        }
+
+        if(right_width != 0) {
+            int x0 = right_x, x1 = right_x + (right_width < 0 ? -right_width : right_width);
+            int y0 = bottom_y + (bottom_height < 0 ? -bottom_height : bottom_height);
+            int y1 = top_y;
+
+            gfx_request_pages(gfx, right_width > 0, x0, y0, x1, y1, wait);
+        }
+    }
+
+    // XXX: this may leak memory because there may be incomplete requests to
+    // COMMIT pages that we mark UNCOMMITTED here
+    gfx->rect_page_x0 = page_x0;
+    gfx->rect_page_y0 = page_y0;
+    gfx->rect_page_x1 = page_x1;
+    gfx->rect_page_y1 = page_y1;
+
+    return 1;
+}
+
 int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     memset(gfx, 0, sizeof(struct gfx));
     gfx->texmmap = texmmap;
@@ -728,7 +884,7 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
     }
 
     int pages_x = 3, pages_y = 2;
-    for(int i = 0; i < pages_x*pages_y; ++i) {
+    for(int i = 0; 0 && i < pages_x*pages_y; ++i) {
         LOGI("**** GET IDLE BUFFER");
 
         //if(i == 1) continue;
@@ -769,6 +925,17 @@ int gfx_paint(
     int num_finished = xfer_finish(&gfx->xfer); // finish uploads
     if(num_finished > 0)
         LOGI("**** TRANSFERS FINISHED: %d", num_finished);
+
+    int page_x0 = MAX(0, MIN((int)state->scroll_x, gfx->tex_width-1)) /
+        gfx->page_width;
+    int page_y0 = MAX(0, MIN((int)state->scroll_y, gfx->tex_width-1)) /
+        gfx->page_height;
+    int page_x1 = (MAX(0, MIN((int)state->scroll_x + width, gfx->tex_width-1)) + gfx->page_width-1) /
+        gfx->page_width;
+    int page_y1 = (MAX(0, MIN((int)state->scroll_y + height, gfx->tex_width-1)) + gfx->page_height-1) /
+        gfx->page_height;
+
+    gfx_request_rect(gfx, page_x0, page_y0, page_x1, page_y1, 0);
 
     glViewport(0, 0, width, height);
 
