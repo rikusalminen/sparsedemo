@@ -69,6 +69,7 @@ struct xfer_buffer {
 
     uint64_t blit_time;
     uint64_t upload_time;
+    uint64_t start_frame;
 };
 
 struct xfer_queue {
@@ -196,7 +197,8 @@ static int xfer_start(
     int src_x, int src_y,
     int dst_x, int dst_y,
     int block_width, int block_height, int block_size,
-    int width, int height) {
+    int width, int height,
+    uint64_t start_frame) {
 
     uint64_t size_bytes = width/block_width * height/block_height * block_size/8;
 
@@ -217,6 +219,8 @@ static int xfer_start(
     xfer_buffer->block_size = block_size;
     xfer_buffer->width = width;
     xfer_buffer->height = height;
+
+    xfer_buffer->start_frame = start_frame;
 
     return 0;
 }
@@ -509,7 +513,7 @@ static int xfer_upload(struct xfer *xfer, int wait) {
     return num;
 }
 
-static int xfer_finish(struct xfer *xfer) {
+static int xfer_finish(struct xfer *xfer, uint64_t frame_number) {
     int queue[XFER_QUEUE_MAX_SIZE];
     int num = xfer_queue_get(&xfer->queue, XFER_QUEUE_WAIT, 0, queue, XFER_QUEUE_MAX_SIZE);
 
@@ -518,7 +522,8 @@ static int xfer_finish(struct xfer *xfer) {
         int buffer_id = queue[i];
         struct xfer_buffer *xfer_buffer = &xfer->buffers[buffer_id];
 
-        LOGI("**** FINISHING BUFFER: %d", buffer_id);
+        uint64_t latency_frames = frame_number - xfer_buffer->start_frame;
+        LOGI("**** FINISHING BUFFER: %d  latency: %llu  frame: %llu  start_frame: %llu", buffer_id, latency_frames, frame_number, xfer_buffer->start_frame);
 
         int finished = xfer_buffer_finish(xfer_buffer, 1, 0, 0, 0);
         if(finished) {
@@ -588,7 +593,8 @@ static int gfx_request_pages(
     int commit,
     int page_x0, int page_y0,
     int page_x1, int page_y1,
-    int wait) {
+    int wait,
+    uint64_t frame_number) {
 
     page_x1 = MIN(page_x1, gfx->tex_width / gfx->page_width);
     page_y1 = MIN(page_y1, gfx->tex_height / gfx->page_height);
@@ -604,9 +610,10 @@ static int gfx_request_pages(
         // XXX: this request is too large to fit in
     }
 
-    LOGI("**** %s  (%d, %d) -> (%d, %d)",
+    LOGI("**** %s  (%d, %d) -> (%d, %d)  frame: %llu",
         commit ? "COMMIT" : "UNCOMMIT",
-        page_x0, page_y0, page_x1, page_y1);
+        page_x0, page_y0, page_x1, page_y1,
+        frame_number);
 
     if(commit) {
         int buffer_id = -1;
@@ -624,7 +631,8 @@ static int gfx_request_pages(
             page_x0 * gfx->page_width, page_y0 * gfx->page_height,
             gfx->block_width, gfx->block_height, gfx->block_size,
             (page_x1 - page_x0) * gfx->page_width,
-            (page_y1 - page_y0) * gfx->page_height);
+            (page_y1 - page_y0) * gfx->page_height,
+            frame_number);
 
         if(xfer_queue_put(&gfx->xfer.queue, XFER_QUEUE_READ, buffer_id) != 1)
             return -1;
@@ -651,7 +659,8 @@ static int gfx_request_rect(
     struct gfx *gfx,
     int page_x0, int page_y0,
     int page_x1, int page_y1,
-    int wait) {
+    int wait,
+    uint64_t frame_number) {
 
     if( gfx->rect_page_x0 == page_x0 &&
         gfx->rect_page_y0 == page_y0 &&
@@ -670,12 +679,12 @@ static int gfx_request_rect(
         gfx_request_pages(gfx, 0,
             gfx->rect_page_x0, gfx->rect_page_y0,
             gfx->rect_page_x1, gfx->rect_page_y1,
-            wait);
+            wait, frame_number);
 
         gfx_request_pages(gfx, 1,
             page_x0, page_y0,
             page_x1, page_y1,
-            wait);
+            wait, frame_number);
     } else {
         // width, height = positive -> commit, negative -> uncommit
         int bottom_y = MIN(gfx->rect_page_y0, page_y0);
@@ -696,7 +705,7 @@ static int gfx_request_rect(
             int x0 = bottom_height < 0 ? gfx->rect_page_x0 : page_x0;
             int x1 = bottom_height < 0 ? gfx->rect_page_x1 : page_x1;
 
-            gfx_request_pages(gfx, bottom_height > 0, x0, y0, x1, y1, wait);
+            gfx_request_pages(gfx, bottom_height > 0, x0, y0, x1, y1, wait, frame_number);
         }
 
         if(top_height != 0) {
@@ -704,7 +713,7 @@ static int gfx_request_rect(
             int x0 = top_height < 0 ? gfx->rect_page_x0 : page_x0;
             int x1 = top_height < 0 ? gfx->rect_page_x1 : page_x1;
 
-            gfx_request_pages(gfx, top_height > 0, x0, y0, x1, y1, wait);
+            gfx_request_pages(gfx, top_height > 0, x0, y0, x1, y1, wait, frame_number);
         }
 
         if(left_width != 0) {
@@ -712,7 +721,7 @@ static int gfx_request_rect(
             int y0 = bottom_y + (bottom_height < 0 ? -bottom_height : bottom_height);
             int y1 = top_y;
 
-            gfx_request_pages(gfx, left_width > 0, x0, y0, x1, y1, wait);
+            gfx_request_pages(gfx, left_width > 0, x0, y0, x1, y1, wait, frame_number);
         }
 
         if(right_width != 0) {
@@ -720,7 +729,7 @@ static int gfx_request_rect(
             int y0 = bottom_y + (bottom_height < 0 ? -bottom_height : bottom_height);
             int y1 = top_y;
 
-            gfx_request_pages(gfx, right_width > 0, x0, y0, x1, y1, wait);
+            gfx_request_pages(gfx, right_width > 0, x0, y0, x1, y1, wait, frame_number);
         }
     }
 
@@ -897,7 +906,8 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
             0 * gfx->page_width, 0 * page_height,
             0, 0,
             gfx->block_width, gfx->block_height, gfx->block_size,
-            4 * gfx->page_width, 4 * gfx->page_width);
+            4 * gfx->page_width, 4 * gfx->page_width,
+            0);
 
         xfer_buffer_blit(xfer_buffer);
         xfer_buffer_upload(xfer_buffer);
@@ -925,7 +935,8 @@ int gfx_init(struct gfx *gfx, struct texmmap *texmmap) {
             (i%pages_x) * gfx->page_width, (i/pages_x) * page_height,
             (i%pages_x) * gfx->page_width, (i/pages_x) * page_height,
             gfx->block_width, gfx->block_height, gfx->block_size,
-            1 * gfx->page_width, 1 * gfx->page_width);
+            1 * gfx->page_width, 1 * gfx->page_width,
+            0);
 
         xfer_queue_put(&gfx->xfer.queue, XFER_QUEUE_READ, buffer_id);
 
@@ -942,9 +953,7 @@ int gfx_paint(
     const struct painter_state *state,
     int width, int height,
     uint64_t frame_number) {
-    (void)frame_number;
-
-    int num_finished = xfer_finish(&gfx->xfer); // finish uploads
+    int num_finished = xfer_finish(&gfx->xfer, frame_number); // finish uploads
     if(num_finished > 0)
         LOGI("**** TRANSFERS FINISHED: %d", num_finished);
 
@@ -957,7 +966,7 @@ int gfx_paint(
     int page_y1 = (MAX(0, MIN((int)state->scroll_y + height, gfx->tex_width-1)) + gfx->page_height-1) /
         gfx->page_height;
 
-    gfx_request_rect(gfx, page_x0, page_y0, page_x1, page_y1, 0);
+    gfx_request_rect(gfx, page_x0, page_y0, page_x1, page_y1, 0, frame_number);
 
     glViewport(0, 0, width, height);
 
