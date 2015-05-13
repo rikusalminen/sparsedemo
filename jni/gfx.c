@@ -65,6 +65,8 @@ struct xfer_buffer {
 
     int page_width, page_height, page_depth;
     int block_width, block_height, block_size;
+
+    uint64_t blit_time;
 };
 
 struct xfer_queue {
@@ -423,7 +425,17 @@ static void* xfer_thread_main(void *arg) {
     while(xfer_queue_get(&xfer->queue, XFER_QUEUE_READ, 1, &buffer_id, 1) == 1) {
         LOGI("**** BLITTING BUFFER: %d", buffer_id);
         struct xfer_buffer *xfer_buffer = &xfer->buffers[buffer_id];
+
+        struct timespec time_start, time_end;
+        clock_gettime(CLOCK_MONOTONIC, &time_start);
         xfer_buffer_blit(xfer_buffer);
+        clock_gettime(CLOCK_MONOTONIC, &time_end);
+
+        xfer_buffer->blit_time =
+            ((uint64_t)time_end.tv_sec * 1000000000 + time_end.tv_nsec) -
+            ((uint64_t)time_start.tv_sec * 1000000000 + time_start.tv_nsec);
+
+        LOGI("**** BUFFER BLIT time: %llu", xfer_buffer->blit_time);
 
         if(xfer_queue_put(&xfer->queue, XFER_QUEUE_UPLOAD, buffer_id) != 1)
             break;
