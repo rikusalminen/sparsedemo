@@ -51,6 +51,7 @@ struct xfer_buffer {
     void *pbo_buffer;
     unsigned pbo;
 
+    unsigned timer_query;
     GLsync syncpt; // NOTE: opaque pointer
 
     void *src_ptr;
@@ -67,6 +68,7 @@ struct xfer_buffer {
     int block_width, block_height, block_size;
 
     uint64_t blit_time;
+    uint64_t upload_time;
 };
 
 struct xfer_queue {
@@ -181,6 +183,8 @@ static int xfer_buffer_init(struct xfer_buffer *xfer_buffer, uint64_t xfer_size)
 
     xfer_buffer->pbo_buffer = ptr;
 
+    glGenQueries(1, &xfer_buffer->timer_query);
+
     return 0;
 }
 
@@ -231,8 +235,9 @@ static int xfer_buffer_blit(struct xfer_buffer *xfer_buffer) {
 }
 
 static int xfer_buffer_upload(struct xfer_buffer *xfer_buffer) {
-    glBindTexture(GL_TEXTURE_2D, xfer_buffer->dst_tex);
+    glBeginQueryIndexed(GL_TIME_ELAPSED, 0, xfer_buffer->timer_query);
 
+    glBindTexture(GL_TEXTURE_2D, xfer_buffer->dst_tex);
     glTexPageCommitmentARB(
         GL_TEXTURE_2D,
         0, // XXX: dst_level
@@ -256,6 +261,8 @@ static int xfer_buffer_upload(struct xfer_buffer *xfer_buffer) {
         NULL);
 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    glEndQueryIndexed(GL_TIME_ELAPSED, 0);
 
     GLbitfield fence_flags = 0; // must be zero
     GLsync syncpt = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, fence_flags);
@@ -319,6 +326,9 @@ static int xfer_buffer_finish(
         glDeleteSync(xfer_buffer->syncpt);
         xfer_buffer->syncpt = 0;
     }
+
+    glGetQueryObjectui64v(xfer_buffer->timer_query, GL_QUERY_RESULT, &xfer_buffer->upload_time);
+    LOGI("**** BUFFER UPLOAD TIME: %llu", xfer_buffer->upload_time);
 
     return status;
 }
