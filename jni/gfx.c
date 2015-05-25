@@ -996,6 +996,8 @@ int gfx_paint(
     return 0;
 }
 
+#include <stdio.h>
+
 int gfx_quit(struct gfx *gfx) {
     xfer_free(&gfx->xfer);
 
@@ -1003,6 +1005,12 @@ int gfx_quit(struct gfx *gfx) {
     glDeleteBuffers(1, &gfx->vbo);
 
     glDeleteProgram(gfx->program);
+
+    // dump benchmark info
+    LOGI("**** dumping bendchmark data");
+    FILE *file = fopen("/data/data/foo.bar.NdkSkeleton/files/dump.txt", "w");
+    fprintf(file, "hello %s\n", "world");
+    fclose(file);
 
     return glGetError() == GL_NO_ERROR ? 0 : -1;
 }
