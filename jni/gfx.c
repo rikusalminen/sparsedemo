@@ -957,13 +957,23 @@ int gfx_paint(
     if(num_finished > 0)
         LOGI("**** TRANSFERS FINISHED: %d", num_finished);
 
-    int page_x0 = MAX(0, MIN((int)state->scroll_x, gfx->tex_width-1)) /
+
+#if 0
+    float scroll_x = state->scroll_x, scroll_y = state->scroll_y;
+#else
+    (void)state;
+    float phase = (2.0*M_PI/5.0) * frame_number / 60.0;
+    float scroll_x = (0.5 + cosf(phase) * 0.5) * (gfx->tex_width - 5 * gfx->page_width);
+    float scroll_y = (0.5 + sinf(phase) * 0.5) * (gfx->tex_height - 5 * gfx->page_height);
+#endif
+
+    int page_x0 = MAX(0, MIN((int)scroll_x, gfx->tex_width-1)) /
         gfx->page_width;
-    int page_y0 = MAX(0, MIN((int)state->scroll_y, gfx->tex_width-1)) /
+    int page_y0 = MAX(0, MIN((int)scroll_y, gfx->tex_width-1)) /
         gfx->page_height;
-    int page_x1 = (MAX(0, MIN((int)state->scroll_x + width, gfx->tex_width-1)) + gfx->page_width-1) /
+    int page_x1 = (MAX(0, MIN((int)scroll_x + width, gfx->tex_width-1)) + gfx->page_width-1) /
         gfx->page_width;
-    int page_y1 = (MAX(0, MIN((int)state->scroll_y + height, gfx->tex_width-1)) + gfx->page_height-1) /
+    int page_y1 = (MAX(0, MIN((int)scroll_y + height, gfx->tex_width-1)) + gfx->page_height-1) /
         gfx->page_height;
 
     gfx_request_rect(gfx, page_x0, page_y0, page_x1, page_y1, 0, frame_number);
@@ -979,8 +989,8 @@ int gfx_paint(
     glBindTexture(GL_TEXTURE_2D, gfx->texture);
     glUniform1i(0, 0);
 
-    glUniform1i(1, state->scroll_x);
-    glUniform1i(2, state->scroll_y);
+    glUniform1i(1, (int)scroll_x);
+    glUniform1i(2, (int)scroll_y);
 
     glBindVertexArray(gfx->vao);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
