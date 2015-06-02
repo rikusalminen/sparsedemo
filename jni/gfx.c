@@ -64,7 +64,6 @@ struct xfer_buffer {
     unsigned dst_tex;
     int dst_x, dst_y;
 
-    int page_width, page_height, page_depth;
     int block_width, block_height, block_size;
 
     uint64_t blit_time;
@@ -82,11 +81,23 @@ struct xfer_queue {
     pthread_cond_t queue_not_empty[XFER_NUM_QUEUES];
 };
 
+#define XFER_BENCHMARK_SIZE (1024)
+#define XFER_BENCHMARK_HISTOGRAM (16)
+
 struct xfer {
     struct xfer_buffer buffers[XFER_NUM_BUFFERS];
     struct xfer_queue queue;
 
     pthread_t threads[XFER_NUM_THREADS];
+
+    // benchmarking results:
+    uint64_t upload_times[XFER_BENCHMARK_SIZE];
+    int upload_idx;
+    uint64_t upload_bytes, upload_nsec;
+    uint64_t blit_times[XFER_BENCHMARK_SIZE];
+    int blit_idx;
+    uint64_t blit_bytes, blit_nsec;
+    uint64_t latency_histogram[XFER_BENCHMARK_HISTOGRAM];
 };
 
 struct gfx {
@@ -522,8 +533,26 @@ static int xfer_finish(struct xfer *xfer, uint64_t frame_number) {
         int buffer_id = queue[i];
         struct xfer_buffer *xfer_buffer = &xfer->buffers[buffer_id];
 
+        int num_pages = (xfer_buffer->width / 512) *
+            (xfer_buffer->height / 512);
+        uint64_t num_bytes = xfer_buffer->block_size/8 *
+            (xfer_buffer->width / xfer_buffer->block_width) *
+            (xfer_buffer->height / xfer_buffer->block_height);
+
         uint64_t latency_frames = frame_number - xfer_buffer->start_frame;
-        LOGI("**** FINISHING BUFFER: %d  latency: %llu  frame: %llu  start_frame: %llu", buffer_id, latency_frames, frame_number, xfer_buffer->start_frame);
+        int latency_idx = latency_frames >= XFER_BENCHMARK_HISTOGRAM ?
+            XFER_BENCHMARK_HISTOGRAM-1 : latency_frames;
+        xfer->latency_histogram[latency_idx] += 1;
+
+        xfer->upload_times[xfer->upload_idx] = xfer_buffer->upload_time / num_pages;
+        xfer->upload_idx = (xfer->upload_idx + 1) % XFER_BENCHMARK_SIZE;
+        xfer->upload_bytes += num_bytes;
+        xfer->upload_nsec += xfer_buffer->upload_time;
+
+        xfer->blit_times[xfer->blit_idx] = xfer_buffer->blit_time / num_pages;
+        xfer->blit_idx = (xfer->blit_idx + 1) % XFER_BENCHMARK_SIZE;
+        xfer->blit_bytes += num_bytes;
+        xfer->blit_nsec += xfer_buffer->blit_time;
 
         int finished = xfer_buffer_finish(xfer_buffer, 1, 0, 0, 0);
         if(finished) {
