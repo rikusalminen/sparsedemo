@@ -81,7 +81,7 @@ struct xfer_queue {
     pthread_cond_t queue_not_empty[XFER_NUM_QUEUES];
 };
 
-#define XFER_BENCHMARK_SIZE (1024)
+#define XFER_BENCHMARK_SIZE (4096)
 #define XFER_BENCHMARK_HISTOGRAM (16)
 
 struct xfer {
@@ -1048,7 +1048,23 @@ int gfx_quit(struct gfx *gfx) {
     // dump benchmark info
     LOGI("**** dumping bendchmark data");
     FILE *file = fopen("/data/data/foo.bar.NdkSkeleton/files/dump.txt", "w");
-    fprintf(file, "hello %s\n", "world");
+
+    fprintf(file, "# latency histogram:\n");
+    for(int i = 0; i < XFER_BENCHMARK_HISTOGRAM; ++i)
+        fprintf(file, "%llu  ", gfx->xfer.latency_histogram[i]);
+
+    fprintf(file, "\n# upload times  (total %llu bytes in %llu nsec, %lf GB/s):\n",
+        gfx->xfer.upload_bytes, gfx->xfer.upload_nsec,
+        (double)gfx->xfer.upload_bytes / gfx->xfer.upload_nsec);
+    for(int i = 0; i < gfx->xfer.upload_idx; ++i)
+        fprintf(file, "%llu  ", gfx->xfer.upload_times[i]);
+
+    fprintf(file, "\n# blit times  (total %llu bytes in %llu nsec, %lf GB/s):\n",
+        gfx->xfer.blit_bytes, gfx->xfer.blit_nsec,
+        (double)gfx->xfer.blit_bytes / gfx->xfer.blit_nsec);
+    for(int i = 0; i < gfx->xfer.blit_idx; ++i)
+        fprintf(file, "%llu  ", gfx->xfer.blit_times[i]);
+
     fclose(file);
 
     return glGetError() == GL_NO_ERROR ? 0 : -1;
