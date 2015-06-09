@@ -992,8 +992,9 @@ int gfx_paint(
 #else
     (void)state;
     float phase = (2.0*M_PI/5.0) * frame_number / 60.0;
-    float scroll_x = (0.5 + cosf(phase) * 0.5) * (gfx->tex_width - 5 * gfx->page_width);
-    float scroll_y = (0.5 + sinf(phase) * 0.5) * (gfx->tex_height - 5 * gfx->page_height);
+    float radius = pow(cos(phase/10.0), 2.0);
+    float scroll_x = (0.5 + radius * cosf(phase) * 0.5) * (gfx->tex_width - 5 * gfx->page_width);
+    float scroll_y = (0.5 + radius * sinf(phase) * 0.5) * (gfx->tex_height - 5 * gfx->page_height);
 #endif
 
     int page_x0 = MAX(0, MIN((int)scroll_x, gfx->tex_width-1)) /
@@ -1047,25 +1048,30 @@ int gfx_quit(struct gfx *gfx) {
 
     // dump benchmark info
     LOGI("**** dumping bendchmark data");
-    FILE *file = fopen("/data/data/foo.bar.NdkSkeleton/files/dump.txt", "w");
 
-    fprintf(file, "# latency histogram:\n");
-    for(int i = 0; i < XFER_BENCHMARK_HISTOGRAM; ++i)
-        fprintf(file, "%llu  ", gfx->xfer.latency_histogram[i]);
+    //fprintf(file, "# latency histogram:\n");
+    //for(int i = 0; i < XFER_BENCHMARK_HISTOGRAM; ++i)
+        //fprintf(file, "%llu  ", gfx->xfer.latency_histogram[i]);
 
-    fprintf(file, "\n# upload times  (total %llu bytes in %llu nsec, %lf GB/s):\n",
-        gfx->xfer.upload_bytes, gfx->xfer.upload_nsec,
-        (double)gfx->xfer.upload_bytes / gfx->xfer.upload_nsec);
-    for(int i = 0; i < gfx->xfer.upload_idx; ++i)
-        fprintf(file, "%llu  ", gfx->xfer.upload_times[i]);
+    {
+        FILE *file = fopen("/data/data/foo.bar.NdkSkeleton/files/upload.txt", "w");
+        fprintf(file, "\n# upload times  (total %llu bytes in %llu nsec, %lf GB/s):\n",
+            gfx->xfer.upload_bytes, gfx->xfer.upload_nsec,
+            (double)gfx->xfer.upload_bytes / gfx->xfer.upload_nsec);
+        for(int i = 0; i < gfx->xfer.upload_idx; ++i)
+            fprintf(file, "%llu\n", gfx->xfer.upload_times[i]);
+        fclose(file);
+    }
 
-    fprintf(file, "\n# blit times  (total %llu bytes in %llu nsec, %lf GB/s):\n",
-        gfx->xfer.blit_bytes, gfx->xfer.blit_nsec,
-        (double)gfx->xfer.blit_bytes / gfx->xfer.blit_nsec);
-    for(int i = 0; i < gfx->xfer.blit_idx; ++i)
-        fprintf(file, "%llu  ", gfx->xfer.blit_times[i]);
-
-    fclose(file);
+    {
+        FILE *file = fopen("/data/data/foo.bar.NdkSkeleton/files/blit.txt", "w");
+        fprintf(file, "\n# blit times  (total %llu bytes in %llu nsec, %lf GB/s):\n",
+            gfx->xfer.blit_bytes, gfx->xfer.blit_nsec,
+            (double)gfx->xfer.blit_bytes / gfx->xfer.blit_nsec);
+        for(int i = 0; i < gfx->xfer.blit_idx; ++i)
+            fprintf(file, "%llu\n", gfx->xfer.blit_times[i]);
+        fclose(file);
+    }
 
     return glGetError() == GL_NO_ERROR ? 0 : -1;
 }
